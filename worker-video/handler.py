@@ -1,4 +1,5 @@
 import base64
+import threading
 import uuid
 
 RESOLUTION = "1080p"
@@ -6,16 +7,42 @@ FPS = 24
 PRO_MAX_DURATION = 10
 FAST_MAX_DURATION = 20
 
+# Mirrors backend/app/moderation.py's DEFAULT_BLOCKLIST. The RunPod endpoint
+# is reachable directly with its own Bearer key, independent of the backend
+# proxy — this is a second, independent trust boundary, so moderation must
+# be enforced here too, not only in the backend before enqueueing.
+BLOCKLIST = [
+    "child sexual", "csam", "bomb making", "how to build a bomb",
+    "bioweapon", "chemical weapon synthesis",
+]
+
+
+def _is_blocked(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(term in lowered for term in BLOCKLIST)
+
 _MODEL = None  # loaded once at container start, see load_model()
+_MODEL_LOCK = threading.Lock()
+
+
+def _load_model_impl():
+    # Real model load happens here (LTX-2.3 weights from the attached
+    # Network Volume). Left as an integration point for the actual
+    # LTX-2.3 runtime — this plan does not vendor model-loading code.
+    return {"loaded": True}
 
 
 def load_model():
     global _MODEL
+    # RunPod serverless can dispatch concurrent requests to one warm worker
+    # process. An unlocked check-then-act here would let two invocations
+    # both see _MODEL is None and both run the (eventually GPU-weight-
+    # loading) init concurrently — wasted memory at best, corrupted shared
+    # state at worst once _load_model_impl is a real model load.
     if _MODEL is None:
-        # Real model load happens here (LTX-2.3 weights from the attached
-        # Network Volume). Left as an integration point for the actual
-        # LTX-2.3 runtime — this plan does not vendor model-loading code.
-        _MODEL = {"loaded": True}
+        with _MODEL_LOCK:
+            if _MODEL is None:
+                _MODEL = _load_model_impl()
     return _MODEL
 
 
@@ -47,6 +74,9 @@ def handler(job: dict) -> dict:
         prompt, duration = validate_input(job.get("input", {}))
     except ValueError as e:
         return {"error": str(e)}
+
+    if _is_blocked(prompt):
+        return {"error": "prompt rejected by moderation"}
 
     variant = select_model_variant(duration)
     video_bytes = _generate_video(prompt, duration, variant)

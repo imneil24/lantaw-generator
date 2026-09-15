@@ -1,5 +1,6 @@
 import time
 import uuid
+from fastapi import Header, HTTPException
 
 
 class SlidingWindowLimiter:
@@ -20,3 +21,11 @@ class SlidingWindowLimiter:
         self._redis.zadd(redis_key, {member: now})
         self._redis.expire(redis_key, self._window_seconds)
         return True
+
+
+def make_rate_limit_dependency(limiter: SlidingWindowLimiter):
+    def enforce_rate_limit(authorization: str | None = Header(None)) -> None:
+        if not limiter.is_allowed(authorization or "unknown"):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+    return enforce_rate_limit

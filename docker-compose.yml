@@ -26,7 +26,9 @@ services:
 
   rq_worker:
     build: ./backend
-    command: rq worker --url ${REDIS_URL}
+    # Queue name must match QUEUE_NAME in backend/app/main.py — a mismatch
+    # here means jobs get enqueued but no worker ever picks them up.
+    command: rq worker clip-image-jobs --url ${REDIS_URL}
     env_file:
       - backend/.env
     depends_on:

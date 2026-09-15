@@ -18,18 +18,14 @@ def _build_app_with_data():
     session = Session()
 
     job_id = str(uuid.uuid4())
-    session.add(Job(id=job_id, api_key_id="primary", type="image", prompt="p",
+    session.add(Job(id=job_id, type="image", prompt="p",
                      duration=None, status="complete", retry_count=0, result_key="images/x.png"))
 
-    other_job_id = str(uuid.uuid4())
-    session.add(Job(id=other_job_id, api_key_id="someone-else", type="image", prompt="p",
-                     duration=None, status="complete", retry_count=0, result_key="images/y.png"))
-
     project_id = str(uuid.uuid4())
-    session.add(VideoProject(id=project_id, api_key_id="primary", target_duration=10.0,
+    session.add(VideoProject(id=project_id, target_duration=10.0,
                               clip_count=1, status="complete", final_result_key="videos/final.mp4"))
     clip_job_id = str(uuid.uuid4())
-    session.add(Job(id=clip_job_id, api_key_id="primary", type="clip", prompt="p",
+    session.add(Job(id=clip_job_id, type="clip", prompt="p",
                      duration=10.0, status="complete", retry_count=0, result_key="clips/c0.mp4"))
     session.flush()
     session.add(ProjectClip(project_id=project_id, sequence_index=0, job_id=clip_job_id))
@@ -41,11 +37,11 @@ def _build_app_with_data():
 
     app.dependency_overrides[get_db_session] = lambda: session
     app.dependency_overrides[get_r2_client] = lambda: FakeR2()
-    return app, job_id, other_job_id, project_id
+    return app, job_id, project_id
 
 
-def test_get_job_returns_signed_url_for_owner():
-    app, job_id, _, _ = _build_app_with_data()
+def test_get_job_returns_signed_url():
+    app, job_id, _ = _build_app_with_data()
     client = TestClient(app)
     response = client.get(f"/jobs/{job_id}", headers={"X-Api-Key-Id": "primary"})
     assert response.status_code == 200
@@ -54,22 +50,15 @@ def test_get_job_returns_signed_url_for_owner():
     assert body["result_url"] == "https://signed.example.com/images/x.png"
 
 
-def test_get_job_rejects_non_owner():
-    app, _, other_job_id, _ = _build_app_with_data()
-    client = TestClient(app)
-    response = client.get(f"/jobs/{other_job_id}", headers={"X-Api-Key-Id": "primary"})
-    assert response.status_code == 404
-
-
 def test_get_job_unknown_id_returns_404():
-    app, _, _, _ = _build_app_with_data()
+    app, _, _ = _build_app_with_data()
     client = TestClient(app)
     response = client.get(f"/jobs/{uuid.uuid4()}", headers={"X-Api-Key-Id": "primary"})
     assert response.status_code == 404
 
 
 def test_get_project_returns_progress_and_final_url():
-    app, _, _, project_id = _build_app_with_data()
+    app, _, project_id = _build_app_with_data()
     client = TestClient(app)
     response = client.get(f"/projects/{project_id}", headers={"X-Api-Key-Id": "primary"})
     assert response.status_code == 200

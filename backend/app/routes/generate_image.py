@@ -30,7 +30,7 @@ def generate_image(
         raise HTTPException(status_code=422, detail="prompt rejected by moderation")
 
     job_id = str(uuid.uuid4())
-    job = Job(id=job_id, api_key_id="primary", type="image", prompt=body.prompt,
+    job = Job(id=job_id, type="image", prompt=body.prompt,
               duration=None, status="pending", retry_count=0)
     session.add(job)
     session.commit()

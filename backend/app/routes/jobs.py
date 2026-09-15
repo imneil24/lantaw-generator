@@ -4,8 +4,6 @@ from app.schemas import JobResponse, ProjectResponse
 
 router = APIRouter()
 
-CURRENT_API_KEY_ID = "primary"  # single trusted client for now
-
 
 def get_db_session():
     raise NotImplementedError("override in app wiring")
@@ -17,7 +15,7 @@ def get_r2_client():
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str, session=Depends(get_db_session), r2_client=Depends(get_r2_client)):
-    job = session.query(Job).filter_by(id=job_id, api_key_id=CURRENT_API_KEY_ID).one_or_none()
+    job = session.query(Job).filter_by(id=job_id).one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     result_url = r2_client.signed_url(job.result_key) if job.result_key else None
@@ -26,7 +24,7 @@ def get_job(job_id: str, session=Depends(get_db_session), r2_client=Depends(get_
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
 def get_project(project_id: str, session=Depends(get_db_session), r2_client=Depends(get_r2_client)):
-    project = session.query(VideoProject).filter_by(id=project_id, api_key_id=CURRENT_API_KEY_ID).one_or_none()
+    project = session.query(VideoProject).filter_by(id=project_id).one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
 

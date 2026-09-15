@@ -23,6 +23,10 @@ class R2Client:
         )
         return key
 
+    def download(self, key: str) -> bytes:
+        response = self._read_client.get_object(Bucket=self._bucket, Key=key)
+        return response["Body"].read()
+
     def signed_url(self, key: str, expires_in: int = 3600) -> str:
         return self._read_client.generate_presigned_url(
             "get_object",

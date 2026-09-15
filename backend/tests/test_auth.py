@@ -7,8 +7,7 @@ from app.security import hash_api_key
 def test_valid_bearer_key_passes():
     stored_hash = hash_api_key("real-key")
     dependency = make_auth_dependency(stored_hash=stored_hash)
-    result = dependency(authorization="Bearer real-key")
-    assert result == "primary"
+    dependency(authorization="Bearer real-key")  # does not raise
 
 
 def test_missing_header_rejected():

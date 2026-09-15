@@ -34,22 +34,23 @@ def generate_video(
 
     clip_count = math.ceil(body.target_duration / PRO_TIER_CLIP_SECONDS)
     project_id = str(uuid.uuid4())
-    project = VideoProject(id=project_id, api_key_id="primary", target_duration=body.target_duration,
+    project = VideoProject(id=project_id, target_duration=body.target_duration,
                             clip_count=clip_count, status="pending")
     session.add(project)
 
+    job_ids = []
     for i in range(clip_count):
         job_id = str(uuid.uuid4())
-        job = Job(id=job_id, api_key_id="primary", type="clip", prompt=body.prompt,
+        job_ids.append(job_id)
+        job = Job(id=job_id, type="clip", prompt=body.prompt,
                   duration=float(PRO_TIER_CLIP_SECONDS), status="pending", retry_count=0)
         session.add(job)
-        session.flush()
         session.add(ProjectClip(project_id=project_id, sequence_index=i, job_id=job_id))
 
     session.commit()
 
-    for clip in session.query(ProjectClip).filter_by(project_id=project_id).all():
-        enqueue(clip.job_id)
+    for job_id in job_ids:
+        enqueue(job_id)
 
     return ProjectResponse(id=project_id, status="pending", clip_count=clip_count,
                             clips_complete=0, final_result_url=None)

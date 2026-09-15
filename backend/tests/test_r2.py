@@ -34,3 +34,16 @@ def test_signed_url_uses_read_client(mock_boto_client):
     url = r2.signed_url("clips/abc.mp4", expires_in=120)
     assert url == "https://signed.example.com/x"
     read_client.generate_presigned_url.assert_called_once()
+
+
+@patch("app.r2.boto3.client")
+def test_download_uses_read_client_and_returns_bytes(mock_boto_client):
+    read_client = MagicMock()
+    body = MagicMock()
+    body.read.return_value = b"clip-bytes"
+    read_client.get_object.return_value = {"Body": body}
+    mock_boto_client.return_value = read_client
+    r2 = R2Client(_fake_settings())
+    data = r2.download("clips/abc.mp4")
+    assert data == b"clip-bytes"
+    read_client.get_object.assert_called_once_with(Bucket="test-bucket", Key="clips/abc.mp4")

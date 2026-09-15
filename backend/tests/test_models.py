@@ -12,14 +12,14 @@ def test_create_job_and_project_with_clips():
 
     project_id = str(uuid.uuid4())
     project = VideoProject(
-        id=project_id, api_key_id="key1", target_duration=20.0,
+        id=project_id, target_duration=20.0,
         clip_count=2, status="pending",
     )
     session.add(project)
 
-    job1 = Job(id=str(uuid.uuid4()), api_key_id="key1", type="clip",
+    job1 = Job(id=str(uuid.uuid4()), type="clip",
                prompt="scene one", duration=10.0, status="pending", retry_count=0)
-    job2 = Job(id=str(uuid.uuid4()), api_key_id="key1", type="clip",
+    job2 = Job(id=str(uuid.uuid4()), type="clip",
                prompt="scene two", duration=10.0, status="pending", retry_count=0)
     session.add_all([job1, job2])
     session.flush()
