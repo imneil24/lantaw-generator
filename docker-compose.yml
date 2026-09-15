@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    environment:
+      - BACKEND_DOMAIN=${BACKEND_DOMAIN}
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    env_file:
+      - backend/.env
+    depends_on:
+      - postgres
+      - redis
+    expose:
+      - "8000"
+
+  rq_worker:
+    build: ./backend
+    command: rq worker --url ${REDIS_URL}
+    env_file:
+      - backend/.env
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=lantaw
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=lantaw
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+
+volumes:
+  caddy_data:
+  postgres_data:
