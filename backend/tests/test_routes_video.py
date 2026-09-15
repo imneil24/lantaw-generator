@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from app.models import Base, VideoProject, ProjectClip
+from app.models import Base, Job, VideoProject, ProjectClip
 from app.routes.generate_video import router, get_db_session, get_moderation, get_queue_enqueue
 
 
@@ -63,3 +63,47 @@ def test_generate_video_rejects_out_of_range_duration():
     )
     assert response.status_code == 422
     assert len(enqueued) == 0
+
+
+def test_generate_video_marks_project_and_unqueued_clips_failed_on_partial_enqueue_failure():
+    app = FastAPI()
+    app.include_router(router)
+
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    session = Session()
+
+    class AllowAllModeration:
+        def check(self, prompt):
+            from app.moderation import ModerationResult
+            return ModerationResult(allowed=True)
+
+    enqueued = []
+
+    def flaky_enqueue(job_id):
+        if len(enqueued) >= 2:
+            raise ConnectionError("redis is down")
+        enqueued.append(job_id)
+
+    app.dependency_overrides[get_db_session] = lambda: session
+    app.dependency_overrides[get_moderation] = lambda: AllowAllModeration()
+    app.dependency_overrides[get_queue_enqueue] = lambda: flaky_enqueue
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        "/generate-video", json={"prompt": "a long journey", "target_duration": 30},  # 3 clips
+        headers={"X-Api-Key-Id": "primary"},
+    )
+
+    assert response.status_code == 503
+    assert len(enqueued) == 2  # 2 succeeded before the 3rd raised
+
+    projects = session.query(VideoProject).all()
+    assert len(projects) == 1
+    assert projects[0].status == "failed"
+
+    jobs = session.query(Job).order_by(Job.id).all()
+    assert len(jobs) == 3
+    failed_jobs = [j for j in jobs if j.status == "failed"]
+    assert len(failed_jobs) == 1  # only the clip whose enqueue never succeeded

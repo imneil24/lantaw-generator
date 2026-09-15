@@ -25,8 +25,6 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.all_secrets())
 
-    app = FastAPI()
-
     engine = get_engine(settings.postgres_dsn)
     Base.metadata.create_all(engine)
     Session = session_factory(engine)
@@ -39,6 +37,15 @@ def create_app() -> FastAPI:
 
     auth_dependency = make_auth_dependency(settings.backend_api_key_hash)
     rate_limit_dependency = make_rate_limit_dependency(limiter)
+
+    # Applied at app construction, not per-router: every route in this
+    # service requires auth, so the default is protected-unless-excluded
+    # rather than protected-only-if-a-router-remembers-to-opt-in. A route
+    # registered later via app.include_router(new_router) without passing
+    # its own `dependencies=` still inherits these — there is no way to add
+    # an unauthenticated route by omission, only by explicitly excluding one
+    # (which this app never needs to do).
+    app = FastAPI(dependencies=[Depends(auth_dependency), Depends(rate_limit_dependency)])
 
     def db_session_override():
         return Session()
@@ -60,13 +67,9 @@ def create_app() -> FastAPI:
             job_queue.enqueue(target, job_id, retry=Retry(max=MAX_RETRIES))
         return enqueue
 
-    # Auth runs before rate-limiting in this list — FastAPI resolves
-    # dependencies in declared order, so an invalid/missing key gets
-    # rejected without ever touching Redis.
-    protected_dependencies = [Depends(auth_dependency), Depends(rate_limit_dependency)]
-    app.include_router(generate_image.router, dependencies=protected_dependencies)
-    app.include_router(generate_video.router, dependencies=protected_dependencies)
-    app.include_router(jobs.router, dependencies=protected_dependencies)
+    app.include_router(generate_image.router)
+    app.include_router(generate_video.router)
+    app.include_router(jobs.router)
 
     app.dependency_overrides[generate_image.get_db_session] = db_session_override
     app.dependency_overrides[generate_image.get_moderation] = moderation_override

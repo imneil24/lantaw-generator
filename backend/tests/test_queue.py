@@ -32,24 +32,34 @@ def test_process_clip_job_marks_complete_on_success():
     assert updated.result_key == "clips/x.mp4"
 
 
-def test_process_clip_job_marks_failed_after_max_retries():
+def test_process_clip_job_marks_failed_and_reraises_when_rq_has_no_retries_left():
     session = _make_session()
     job_id = str(uuid.uuid4())
-    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=3))
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=2))
     session.commit()
 
     runpod_client = MagicMock()
     runpod_client.dispatch_video.side_effect = RuntimeError("upstream down")
     r2_client = MagicMock()
 
-    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
-        process_clip_job(job_id)
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)), \
+         patch("app.queue._is_final_attempt", return_value=True):
+        # Still re-raises even on the final attempt — RQ's own Retry
+        # mechanism (not this function) decides not to re-enqueue based on
+        # its internal retries_left, and needs the exception to record the
+        # job as failed in its own FailedJobRegistry.
+        try:
+            process_clip_job(job_id)
+            assert False, "expected RuntimeError to propagate to RQ"
+        except RuntimeError:
+            pass
 
     updated = session.query(Job).filter_by(id=job_id).one()
     assert updated.status == "failed"
+    assert updated.retry_count == 3
 
 
-def test_process_clip_job_reraises_and_increments_retry_count_below_max():
+def test_process_clip_job_reraises_and_increments_retry_count_when_rq_has_retries_left():
     session = _make_session()
     job_id = str(uuid.uuid4())
     session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
@@ -59,7 +69,8 @@ def test_process_clip_job_reraises_and_increments_retry_count_below_max():
     runpod_client.dispatch_video.side_effect = RuntimeError("upstream down")
     r2_client = MagicMock()
 
-    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)), \
+         patch("app.queue._is_final_attempt", return_value=False):
         try:
             process_clip_job(job_id)
             assert False, "expected RuntimeError to propagate so RQ retries the job"
@@ -69,6 +80,22 @@ def test_process_clip_job_reraises_and_increments_retry_count_below_max():
     updated = session.query(Job).filter_by(id=job_id).one()
     assert updated.retry_count == 1
     assert updated.status == "pending"
+
+
+def test_is_final_attempt_true_outside_rq_worker_context():
+    from app.queue import _is_final_attempt
+    with patch("app.queue.get_current_job", return_value=None):
+        assert _is_final_attempt() is True
+
+
+def test_is_final_attempt_reads_rq_retries_left():
+    from app.queue import _is_final_attempt
+    fake_job = MagicMock(retries_left=2)
+    with patch("app.queue.get_current_job", return_value=fake_job):
+        assert _is_final_attempt() is False
+    fake_job.retries_left = 0
+    with patch("app.queue.get_current_job", return_value=fake_job):
+        assert _is_final_attempt() is True
 
 
 def test_process_clip_job_missing_row_returns_without_raising():
@@ -142,6 +169,113 @@ def test_process_clip_job_does_not_stitch_when_sibling_clips_still_pending():
     mock_stitch.assert_not_called()
     project = session.query(VideoProject).filter_by(id=project_id).one()
     assert project.status == "pending"
+
+
+def test_process_clip_job_skips_dispatch_when_already_complete():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="complete",
+                     retry_count=0, result_key="clips/already.mp4"))
+    session.commit()
+
+    runpod_client = MagicMock()
+    r2_client = MagicMock()
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        process_clip_job(job_id)  # redelivered/duplicate job
+
+    runpod_client.dispatch_video.assert_not_called()
+    r2_client.upload.assert_not_called()
+
+
+def test_process_image_job_skips_dispatch_when_already_complete():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="complete",
+                     retry_count=0, result_key="images/already.png"))
+    session.commit()
+
+    runpod_client = MagicMock()
+    r2_client = MagicMock()
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        process_image_job(job_id)
+
+    runpod_client.dispatch_image.assert_not_called()
+    r2_client.upload.assert_not_called()
+
+
+def test_maybe_stitch_project_does_not_restitch_already_complete_project():
+    session = _make_session()
+
+    project_id = str(uuid.uuid4())
+    session.add(VideoProject(id=project_id, target_duration=10.0, clip_count=1, status="complete",
+                              final_result_key="videos/already-final.mp4"))
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="complete",
+                     retry_count=0, result_key="clips/a.mp4"))
+    session.add(ProjectClip(project_id=project_id, sequence_index=0, job_id=job_id))
+    session.commit()
+
+    from app.queue import _maybe_stitch_project
+    r2_client = MagicMock()
+    job = session.query(Job).filter_by(id=job_id).one()
+
+    with patch("app.queue.stitch_project") as mock_stitch:
+        _maybe_stitch_project(session, r2_client, job)
+
+    mock_stitch.assert_not_called()
+    project = session.query(VideoProject).filter_by(id=project_id).one()
+    assert project.final_result_key == "videos/already-final.mp4"  # untouched
+
+
+def test_maybe_stitch_project_handles_missing_sibling_job_gracefully():
+    session = _make_session()
+
+    project_id = str(uuid.uuid4())
+    session.add(VideoProject(id=project_id, target_duration=20.0, clip_count=2, status="pending"))
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="complete",
+                     retry_count=0, result_key="clips/a.mp4"))
+    session.add(ProjectClip(project_id=project_id, sequence_index=0, job_id=job_id))
+    # sibling clip references a job_id with no matching Job row
+    session.add(ProjectClip(project_id=project_id, sequence_index=1, job_id=str(uuid.uuid4())))
+    session.commit()
+
+    from app.queue import _maybe_stitch_project
+    r2_client = MagicMock()
+    job = session.query(Job).filter_by(id=job_id).one()
+
+    with patch("app.queue.stitch_project") as mock_stitch:
+        _maybe_stitch_project(session, r2_client, job)  # does not raise KeyError
+
+    mock_stitch.assert_not_called()
+    project = session.query(VideoProject).filter_by(id=project_id).one()
+    assert project.status == "pending"
+
+
+def test_maybe_stitch_project_failure_does_not_affect_clip_job_status():
+    session = _make_session()
+
+    project_id = str(uuid.uuid4())
+    session.add(VideoProject(id=project_id, target_duration=10.0, clip_count=1, status="pending"))
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="complete",
+                     retry_count=0, result_key="clips/a.mp4"))
+    session.add(ProjectClip(project_id=project_id, sequence_index=0, job_id=job_id))
+    session.commit()
+
+    from app.queue import _maybe_stitch_project
+    r2_client = MagicMock()
+    r2_client.download.side_effect = RuntimeError("R2 is down")
+    job = session.query(Job).filter_by(id=job_id).one()
+
+    _maybe_stitch_project(session, r2_client, job)  # swallows the error, does not raise
+
+    updated_job = session.query(Job).filter_by(id=job_id).one()
+    assert updated_job.status == "complete"  # clip job unaffected by stitch failure
+    project = session.query(VideoProject).filter_by(id=project_id).one()
+    assert project.status == "pending"  # stitch never completed, but nothing corrupted
 
 
 def test_process_image_job_marks_complete_on_success():

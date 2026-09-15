@@ -44,6 +44,22 @@ def test_wrong_key_rejected(monkeypatch, tmp_path):
     assert response.status_code == 401
 
 
+def test_route_added_without_explicit_dependencies_still_requires_auth(monkeypatch, tmp_path):
+    _set_env(monkeypatch, tmp_path)
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.main import create_app
+    app = create_app()
+
+    @app.get("/__new-route-nobody-remembered-to-protect")
+    def unprotected_by_omission():
+        return {"ok": True}
+
+    client = TestClient(app)
+    response = client.get("/__new-route-nobody-remembered-to-protect")
+    assert response.status_code == 401
+
+
 def test_unhandled_exception_returns_generic_500_with_correlation_id(monkeypatch, tmp_path):
     _set_env(monkeypatch, tmp_path)
     from app.config import get_settings
@@ -56,7 +72,10 @@ def test_unhandled_exception_returns_generic_500_with_correlation_id(monkeypatch
         raise ValueError("internal secret detail: sk-abc123")
 
     client = TestClient(app, raise_server_exceptions=False)
-    response = client.get("/__boom")
+    # App-level dependencies (auth, rate limit) now apply to every route,
+    # including ones registered after create_app() returns — this route
+    # would otherwise 401 before ever reaching the handler under test.
+    response = client.get("/__boom", headers={"Authorization": "Bearer test-key"})
     assert response.status_code == 500
     body = response.json()
     assert "sk-abc123" not in response.text

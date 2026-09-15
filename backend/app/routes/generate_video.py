@@ -49,8 +49,29 @@ def generate_video(
 
     session.commit()
 
-    for job_id in job_ids:
-        enqueue(job_id)
+    enqueued_count = 0
+    try:
+        for job_id in job_ids:
+            enqueue(job_id)
+            enqueued_count += 1
+    except Exception:
+        # Some clips already have jobs in Postgres with no queued work behind
+        # them (e.g. Redis dropped mid-loop) — mark the whole project and its
+        # never-enqueued clips as failed rather than leaving them stuck at
+        # "pending" forever with nothing that will ever process them.
+        never_enqueued_ids = job_ids[enqueued_count:]
+        if never_enqueued_ids:
+            # synchronize_session="fetch" (not the default False) keeps the
+            # in-memory Job objects already loaded in this session's
+            # identity map (from the create loop above) in sync with the
+            # bulk update — otherwise a later query in the same session can
+            # return stale, pre-update objects for these same rows.
+            session.query(Job).filter(Job.id.in_(never_enqueued_ids)).update(
+                {"status": "failed"}, synchronize_session="fetch",
+            )
+        project.status = "failed"
+        session.commit()
+        raise HTTPException(status_code=503, detail="failed to queue video generation, please retry")
 
     return ProjectResponse(id=project_id, status="pending", clip_count=clip_count,
                             clips_complete=0, final_result_url=None)
