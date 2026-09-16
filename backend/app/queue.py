@@ -126,6 +126,16 @@ def _maybe_stitch_project(session, r2_client, job: Job) -> None:
         logger.exception("stitching failed for job_id=%s; clip job is unaffected", job.id)
 
 
+def _extract_output(result: dict) -> dict:
+    # RunPod's handler returns {"error": "..."} (not {"output": ...}) for
+    # validation/moderation rejections and unimplemented-inference stubs —
+    # surface that as a clear RuntimeError instead of a raw KeyError so
+    # _handle_failure's retry/failure bookkeeping gets a legible message.
+    if "output" not in result:
+        raise RuntimeError(f"RunPod job returned no output: {result.get('error', result)}")
+    return result["output"]
+
+
 def process_clip_job(job_id: str) -> None:
     session, runpod_client, r2_client = _build_dependencies()
     try:
@@ -139,8 +149,9 @@ def process_clip_job(job_id: str) -> None:
 
         try:
             result = runpod_client.dispatch_video(prompt=job.prompt, duration=job.duration)
-            raw_bytes = base64.b64decode(result["output"]["bytes_b64"])
-            key = result["output"]["key"]
+            output = _extract_output(result)
+            raw_bytes = base64.b64decode(output["bytes_b64"])
+            key = output["key"]
             r2_client.upload(key, raw_bytes, "video/mp4")
             job.status = "complete"
             job.result_key = key
@@ -167,8 +178,9 @@ def process_image_job(job_id: str) -> None:
 
         try:
             result = runpod_client.dispatch_image(prompt=job.prompt)
-            raw_bytes = base64.b64decode(result["output"]["bytes_b64"])
-            key = result["output"]["key"]
+            output = _extract_output(result)
+            raw_bytes = base64.b64decode(output["bytes_b64"])
+            key = output["key"]
             r2_client.upload(key, raw_bytes, "image/png")
             job.status = "complete"
             job.result_key = key
