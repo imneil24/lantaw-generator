@@ -37,6 +37,11 @@ def generate_video(
     project = VideoProject(id=project_id, target_duration=body.target_duration,
                             clip_count=clip_count, status="pending")
     session.add(project)
+    # Flush now so the parent row exists before any ProjectClip referencing
+    # it is added below — VideoProject/ProjectClip have no ORM relationship()
+    # declared (only a column-level ForeignKey), so SQLAlchemy's unit-of-work
+    # has no relationship graph to use for flush ordering between them.
+    session.flush()
 
     job_ids = []
     for i in range(clip_count):
