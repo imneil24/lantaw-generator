@@ -48,3 +48,16 @@ cd ops && python -m pytest -v
   Volume attachment) is done via the RunPod console/API directly, not code.
 - `docker-compose.yml`'s Caddy TLS sidecar requires a real domain pointed at
   the host to issue a certificate — verify after deployment.
+
+## R2 bucket lifecycle (manual setup, not app code)
+
+Final stitched videos (`videos/` prefix) are meant to be ephemeral — the
+signed URL returned by `GET /projects/{id}` expires after 1 hour
+(`R2Client.signed_url`'s `expires_in` default), but that only expires the
+*link*; the object itself stays in the bucket until deleted. Set a
+Cloudflare R2 lifecycle rule on the `videos/` prefix to expire objects
+1 hour after upload, matching the signed URL's lifetime — do this via the
+R2 dashboard (Bucket → Settings → Object lifecycle rules) or the R2 API,
+not in application code. Raw clips (`clips/` prefix) are intentionally
+excluded from this rule since a project's stitch step may need to re-read
+them on retry.
