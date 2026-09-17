@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3.11 pyth
 
 WORKDIR /worker
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt torch --index-url https://download.pytorch.org/whl/cu124
+RUN pip install --no-cache-dir -r requirements.txt torch --extra-index-url https://download.pytorch.org/whl/cu124
 
 COPY handler.py .
 
