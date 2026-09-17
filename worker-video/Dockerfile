@@ -26,4 +26,10 @@ RUN uv pip install --no-cache-dir -r /worker/requirements.txt
 
 COPY handler.py /worker/handler.py
 
-CMD ["/worker/ltx2-repo/.venv/bin/python3", "-u", "-c", "import sys; sys.path.insert(0, '/worker'); import runpod, handler; runpod.serverless.start({'handler': handler.handler})"]
+# triton's runtime JIT-compile links against libcuda.so.1 (the driver stub),
+# which RunPod's container runtime mounts in from the host driver rather than
+# baking into the image — but the -runtime base image never runs ldconfig
+# against those mounted paths, so gcc's default linker search misses it even
+# though the file exists on disk. Refreshing the cache at container start
+# (not build time, when the GPU/driver mount isn't present yet) fixes this.
+CMD ["/bin/sh", "-c", "ldconfig; exec /worker/ltx2-repo/.venv/bin/python3 -u -c \"import sys; sys.path.insert(0, '/worker'); import runpod, handler; runpod.serverless.start({'handler': handler.handler})\""]
