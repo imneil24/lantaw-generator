@@ -6,11 +6,16 @@ import uuid
 
 from ltx_core.model.video_vae import get_video_chunks_number
 from ltx_pipelines.distilled import DistilledPipeline
+from ltx_pipelines.utils.helpers import snap_frames_to_grid
 from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.model_paths import ModelPaths
 
+# Two-stage pipelines (DistilledPipeline) require both dimensions divisible by
+# 64 (ltx_pipelines.utils.helpers.assert_resolution). 1088 is the standard
+# "1080p-safe" height used across video codecs for exactly this reason
+# (64 * 17 = 1088); true 1080 is not a multiple of 64.
 RESOLUTION_WIDTH = 1920
-RESOLUTION_HEIGHT = 1080
+RESOLUTION_HEIGHT = 1088
 FPS = 24
 FAST_MAX_DURATION = 20
 
@@ -83,7 +88,9 @@ def validate_input(job_input: dict) -> tuple[str, float]:
 
 def _generate_video(prompt: str, duration: float) -> bytes:
     pipeline = load_pipeline()
-    num_frames = round(duration * FPS)
+    # The VAE's causal temporal grid requires (frames - 1) % scale_factors.time == 0;
+    # snap_frames_to_grid rounds down to the nearest valid value.
+    num_frames = snap_frames_to_grid(round(duration * FPS))
 
     result = pipeline(
         prompt=prompt,
