@@ -1,11 +1,25 @@
 import base64
+import os
+import tempfile
 import threading
 import uuid
 
-RESOLUTION = "1080p"
+from ltx_core.model.video_vae import get_video_chunks_number
+from ltx_pipelines.distilled import DistilledPipeline
+from ltx_pipelines.utils.media_io import encode_video
+from ltx_pipelines.utils.model_paths import ModelPaths
+
+RESOLUTION_WIDTH = 1920
+RESOLUTION_HEIGHT = 1080
 FPS = 24
-PRO_MAX_DURATION = 10
 FAST_MAX_DURATION = 20
+
+MODEL_ROOT = "/runpod-volume/ltx-2.5"
+TRANSFORMER_PATH = f"{MODEL_ROOT}/diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"
+TEXT_ENCODER_PATH = f"{MODEL_ROOT}/text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
+VIDEO_VAE_PATH = f"{MODEL_ROOT}/vae/ltx-2.5-video-vae-bf16.safetensors"
+AUDIO_VAE_PATH = f"{MODEL_ROOT}/vae/ltx-2.5-audio-vae-bf16.safetensors"
+SPATIAL_UPSAMPLER_PATH = f"{MODEL_ROOT}/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
 
 # Mirrors backend/app/moderation.py's DEFAULT_BLOCKLIST. The RunPod endpoint
 # is reachable directly with its own Bearer key, independent of the backend
@@ -21,29 +35,36 @@ def _is_blocked(prompt: str) -> bool:
     lowered = prompt.lower()
     return any(term in lowered for term in BLOCKLIST)
 
-_MODEL = None  # loaded once at container start, see load_model()
-_MODEL_LOCK = threading.Lock()
+
+_PIPELINE = None
+_PIPELINE_LOCK = threading.Lock()
 
 
-def _load_model_impl():
-    # Real model load happens here (LTX-2.3 weights from the attached
-    # Network Volume). Left as an integration point for the actual
-    # LTX-2.3 runtime — this plan does not vendor model-loading code.
-    return {"loaded": True}
+def _load_pipeline_impl() -> DistilledPipeline:
+    model_paths = ModelPaths.from_split(
+        transformer_path=TRANSFORMER_PATH,
+        text_encoder_path=TEXT_ENCODER_PATH,
+        video_vae_path=VIDEO_VAE_PATH,
+        audio_vae_path=AUDIO_VAE_PATH,
+    )
+    return DistilledPipeline(
+        model_paths=model_paths,
+        spatial_upsampler_path=SPATIAL_UPSAMPLER_PATH,
+        loras=[],
+    )
 
 
-def load_model():
-    global _MODEL
+def load_pipeline() -> DistilledPipeline:
+    global _PIPELINE
     # RunPod serverless can dispatch concurrent requests to one warm worker
     # process. An unlocked check-then-act here would let two invocations
-    # both see _MODEL is None and both run the (eventually GPU-weight-
-    # loading) init concurrently — wasted memory at best, corrupted shared
-    # state at worst once _load_model_impl is a real model load.
-    if _MODEL is None:
-        with _MODEL_LOCK:
-            if _MODEL is None:
-                _MODEL = _load_model_impl()
-    return _MODEL
+    # both see _PIPELINE is None and both run the GPU-weight-loading init
+    # concurrently — wasted memory at best, corrupted shared state at worst.
+    if _PIPELINE is None:
+        with _PIPELINE_LOCK:
+            if _PIPELINE is None:
+                _PIPELINE = _load_pipeline_impl()
+    return _PIPELINE
 
 
 def validate_input(job_input: dict) -> tuple[str, float]:
@@ -60,13 +81,35 @@ def validate_input(job_input: dict) -> tuple[str, float]:
     return job_input["prompt"], duration
 
 
-def select_model_variant(duration: float) -> str:
-    return "ltx-2-3-pro" if duration <= PRO_MAX_DURATION else "ltx-2-3-fast"
+def _generate_video(prompt: str, duration: float) -> bytes:
+    pipeline = load_pipeline()
+    num_frames = round(duration * FPS)
 
+    result = pipeline(
+        prompt=prompt,
+        seed=int.from_bytes(os.urandom(4), "big"),
+        height=RESOLUTION_HEIGHT,
+        width=RESOLUTION_WIDTH,
+        frame_rate=FPS,
+        images=[],
+        num_frames=num_frames,
+    )
 
-def _generate_video(prompt: str, duration: float, variant: str) -> bytes:
-    load_model()
-    raise NotImplementedError("wire actual LTX-2.3 inference call here")
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
+        output_path = tmp_file.name
+
+    try:
+        encode_video(
+            video=result.video,
+            fps=FPS,
+            audio=result.audio,
+            output_path=output_path,
+            video_chunks_number=get_video_chunks_number(result.num_frames, result.tiling_config),
+        )
+        with open(output_path, "rb") as f:
+            return f.read()
+    finally:
+        os.remove(output_path)
 
 
 def handler(job: dict) -> dict:
@@ -78,7 +121,6 @@ def handler(job: dict) -> dict:
     if _is_blocked(prompt):
         return {"error": "prompt rejected by moderation"}
 
-    variant = select_model_variant(duration)
-    video_bytes = _generate_video(prompt, duration, variant)
+    video_bytes = _generate_video(prompt, duration)
     key = f"clips/{uuid.uuid4().hex}.mp4"
     return {"output": {"key": key, "bytes_b64": base64.b64encode(video_bytes).decode("ascii")}}

@@ -1,14 +1,25 @@
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM nvidia/cuda:13.2.1-cudnn-runtime-ubuntu22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3-pip git curl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# uv manages the LTX-2 workspace's own dependency resolution (torch 2.13/cu132,
+# natten's flat wheel index, the ltx-core/ltx-pipelines workspace members) —
+# pip alone cannot reproduce this, see packages/ltx-core/pyproject.toml's
+# [tool.uv.sources] index pins.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /worker
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt torch --extra-index-url https://download.pytorch.org/whl/cu124
-
-COPY handler.py .
 
 # Model weights are NOT baked into this image — they load from the
 # RunPod Network Volume mounted at /runpod-volume at container start.
+RUN git clone --depth 1 https://github.com/Lightricks/LTX-2.git ltx2-repo
+WORKDIR /worker/ltx2-repo
+RUN uv sync --extra natten
 
-CMD ["python3", "-u", "-c", "import runpod, handler; runpod.serverless.start({'handler': handler.handler})"]
+COPY requirements.txt /worker/requirements.txt
+RUN uv pip install --no-cache-dir -r /worker/requirements.txt
+
+COPY handler.py /worker/handler.py
+
+CMD ["/worker/ltx2-repo/.venv/bin/python3", "-u", "-c", "import sys; sys.path.insert(0, '/worker'); import runpod, handler; runpod.serverless.start({'handler': handler.handler})"]
