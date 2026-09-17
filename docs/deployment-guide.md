@@ -85,6 +85,10 @@ No VPS provider, no domain registrar needed for this pass.
    (matches `EXPOSE 8000` / the `uvicorn --port 8000` command in
    `backend/Dockerfile`) — Railway usually detects this from the
    `EXPOSE` line, but check it explicitly.
+5. Settings → **Watch Paths** → set to `backend/**`. Without this,
+   Railway redeploys on every push to `master` regardless of which
+   directory changed — a `worker-video/`-only fix would needlessly
+   restart the live backend and briefly interrupt request handling.
 
 Leave the environment variables for now — set them all together in
 Part 6.
@@ -111,6 +115,8 @@ exactly like `docker-compose.yml`'s separate `rq_worker` service.
    means jobs get created but nothing ever processes them.
 4. This service does **not** need Generate Domain / a public port — it
    only consumes from Redis, nothing calls it over HTTP.
+5. Settings → **Watch Paths** → set to `backend/**`, same reasoning as
+   the backend service in Part 2.
 
 ---
 
