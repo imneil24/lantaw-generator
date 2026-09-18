@@ -4,6 +4,8 @@ import tempfile
 import threading
 import uuid
 
+import torch
+
 from ltx_core.model.video_vae import get_video_chunks_number
 from ltx_pipelines.distilled import DistilledPipeline
 from ltx_pipelines.utils.helpers import snap_frames_to_grid
@@ -99,15 +101,22 @@ def _generate_video(prompt: str, duration: float) -> bytes:
     # snap_frames_to_grid rounds down to the nearest valid value.
     num_frames = snap_frames_to_grid(round(duration * FPS))
 
-    result = pipeline(
-        prompt=prompt,
-        seed=int.from_bytes(os.urandom(4), "big"),
-        height=RESOLUTION_HEIGHT,
-        width=RESOLUTION_WIDTH,
-        frame_rate=FPS,
-        images=[],
-        num_frames=num_frames,
-    )
+    # LTX-2's own CLI entrypoint (ltx_pipelines.distilled.main) wraps the
+    # whole pipeline call in torch.inference_mode(). Without it, tensors the
+    # library creates internally under an inference-mode context (e.g. during
+    # prompt encoding) get mixed with default-mode autograd tracking in later
+    # denoising steps, which torch rejects: "Inference tensors cannot be
+    # saved for backward."
+    with torch.inference_mode():
+        result = pipeline(
+            prompt=prompt,
+            seed=int.from_bytes(os.urandom(4), "big"),
+            height=RESOLUTION_HEIGHT,
+            width=RESOLUTION_WIDTH,
+            frame_rate=FPS,
+            images=[],
+            num_frames=num_frames,
+        )
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
         output_path = tmp_file.name
