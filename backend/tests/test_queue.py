@@ -1,9 +1,22 @@
 import uuid
 from unittest.mock import MagicMock, patch
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Job, VideoProject, ProjectClip
-from app.queue import process_clip_job, process_image_job
+from app.queue import process_clip_job, process_image_job, _extract_output
+
+
+def test_extract_output_raises_on_completed_job_with_empty_output():
+    # RunPod has been observed marking a job COMPLETED with an empty/None
+    # output when the worker container crashes hard (e.g. OOM kill) instead
+    # of the handler raising a catchable exception — output["key"] on that
+    # would previously crash with a raw KeyError instead of a legible
+    # failure message.
+    with pytest.raises(RuntimeError, match="empty"):
+        _extract_output({"output": None})
+    with pytest.raises(RuntimeError, match="empty"):
+        _extract_output({"output": {}})
 
 
 def _make_session():

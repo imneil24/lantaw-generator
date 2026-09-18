@@ -133,7 +133,15 @@ def _extract_output(result: dict) -> dict:
     # _handle_failure's retry/failure bookkeeping gets a legible message.
     if "output" not in result:
         raise RuntimeError(f"RunPod job returned no output: {result.get('error', result)}")
-    return result["output"]
+    output = result["output"]
+    # RunPod has been observed marking a job COMPLETED with an empty/None
+    # output when the worker container is killed outright (e.g. an OOM
+    # kill) rather than the handler raising a catchable exception — that
+    # case must fail loudly here instead of crashing downstream on
+    # output["key"] with an unrelated-looking KeyError.
+    if not output:
+        raise RuntimeError("RunPod job completed but returned an empty output (worker likely crashed)")
+    return output
 
 
 def process_clip_job(job_id: str) -> None:
