@@ -105,15 +105,19 @@ def _generate_video(prompt: str, duration: float) -> bytes:
         output_path = tmp_file.name
 
     try:
-        # LTX-2's own CLI entrypoint (ltx_pipelines.distilled.main) wraps the
-        # whole pipeline call *and* the encode_video call in torch.inference_mode().
-        # result.video is a lazy iterator: the actual VAE decode tensor ops run
-        # when encode_video pulls from it, not when pipeline() returns — closing
-        # the inference_mode context beforehand left that decode step running in
-        # default (autograd-tracking) mode, which torch rejects when it touches
-        # tensors created earlier under inference_mode: "Inference tensors cannot
-        # be saved for backward."
-        with torch.inference_mode():
+        # inference_mode() still crashed here ("Inference tensors cannot be
+        # saved for backward") deep inside the VAE decoder's streamed
+        # transformer blocks (rms_norm), even with encode_video wrapped in
+        # the same context — the pipeline's model is built once at cold
+        # start (load_pipeline, module-global, outside any inference_mode
+        # scope) and reused across calls, and its streamed weight loading
+        # mutates buffers on that long-lived model during the forward pass.
+        # inference_mode's special "inference tensor" tagging does not mix
+        # safely across that boundary. torch's own error message names the
+        # fix: no_grad() disables grad tracking the same way for our
+        # purposes (no backward pass ever runs here) without creating
+        # inference tensors, so it doesn't trip this check.
+        with torch.no_grad():
             result = pipeline(
                 prompt=prompt,
                 seed=int.from_bytes(os.urandom(4), "big"),
