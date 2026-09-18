@@ -144,6 +144,18 @@ def _extract_output(result: dict) -> dict:
     return output
 
 
+def _finish_clip_job(session, r2_client, job: Job, result: dict) -> None:
+    output = _extract_output(result)
+    # The worker uploads the clip to R2 itself and returns only the key (see
+    # worker-video/handler.py) — a full HD video base64-encoded into the job
+    # result is too large for RunPod's own /job-done callback, which rejects
+    # it with a 400 before the backend ever sees a completed job.
+    job.status = "complete"
+    job.result_key = output["key"]
+    session.commit()
+    _maybe_stitch_project(session, r2_client, job)
+
+
 def process_clip_job(job_id: str) -> None:
     session, runpod_client, r2_client = _build_dependencies()
     try:
@@ -163,20 +175,61 @@ def process_clip_job(job_id: str) -> None:
             result = runpod_client.dispatch_video(
                 prompt=job.prompt, duration=job.duration, on_submitted=_persist_runpod_job_id,
             )
-            output = _extract_output(result)
-            # The worker uploads the clip to R2 itself and returns only the
-            # key (see worker-video/handler.py) — a full HD video
-            # base64-encoded into the job result is too large for RunPod's
-            # own /job-done callback, which rejects it with a 400 before the
-            # backend ever sees a completed job.
-            job.status = "complete"
-            job.result_key = output["key"]
-            session.commit()
         except Exception as exc:
             _handle_failure(session, job, exc)
             return
 
-        _maybe_stitch_project(session, r2_client, job)
+        _finish_clip_job(session, r2_client, job, result)
+    finally:
+        session.close()
+
+
+def resume_orphaned_jobs() -> None:
+    """Resumes clip jobs that were dispatched to RunPod but never finished.
+
+    A worker process that dies mid-poll (crash, redeploy, OOM) loses the
+    in-memory RunpodClient poll loop entirely — the RunPod job keeps running
+    server-side and uploads to R2 regardless, but the DB row is left at
+    status="pending" forever since it's never updated by anything. Job.
+    runpod_job_id is only ever set right after a successful RunPod /run
+    submission (see _persist_runpod_job_id above), so status=="pending" AND
+    runpod_job_id is not None unambiguously identifies a job that was
+    dispatched but whose worker died before the result came back — a fresh,
+    never-dispatched job has runpod_job_id=None. Called once at worker
+    startup (see worker_entrypoint.py) rather than from inside a normal job
+    handler, since this is a sweep across all orphans, not a single job.
+    """
+    session, runpod_client, r2_client = _build_dependencies()
+    try:
+        orphans = session.query(Job).filter(
+            Job.status == "pending", Job.runpod_job_id.isnot(None),
+        ).all()
+        for job in orphans:
+            try:
+                if job.type == "clip":
+                    result = runpod_client.poll_video(job.runpod_job_id)
+                    _finish_clip_job(session, r2_client, job, result)
+                else:
+                    result = runpod_client.poll_image(job.runpod_job_id)
+                    output = _extract_output(result)
+                    raw_bytes = base64.b64decode(output["bytes_b64"])
+                    key = output["key"]
+                    r2_client.upload(key, raw_bytes, "image/png")
+                    job.status = "complete"
+                    job.result_key = key
+                    session.commit()
+            except Exception:
+                # Not running inside an RQ job (this is a one-shot startup
+                # sweep), so there's no RQ retry mechanism to hand the
+                # exception to — mark it failed directly and move on to the
+                # next orphan rather than reusing _handle_failure, which
+                # always re-raises for RQ's benefit and would abort the
+                # whole sweep after the first failure.
+                logger.exception("failed to resume orphaned job_id=%s", job.id)
+                session.rollback()
+                job.retry_count += 1
+                job.status = "failed"
+                session.commit()
     finally:
         session.close()
 

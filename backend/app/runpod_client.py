@@ -26,6 +26,21 @@ class RunpodClient:
     def dispatch_image(self, prompt: str, on_submitted: Callable[[str], None] | None = None) -> dict:
         return self._dispatch(self._image_endpoint, self._image_key, {"prompt": prompt}, on_submitted)
 
+    def poll_video(self, job_id: str) -> dict:
+        """Resumes polling an already-submitted video job by its RunPod job_id.
+
+        For a job whose runpod_job_id was persisted (see queue.py's
+        on_submitted callback) but whose worker process died before the
+        original dispatch_video's poll loop returned — resuming here polls
+        the same RunPod job instead of submitting a duplicate one.
+        """
+        base = self._video_endpoint.rsplit("/", 1)[0]
+        return self._poll(base, self._video_key, job_id)
+
+    def poll_image(self, job_id: str) -> dict:
+        base = self._image_endpoint.rsplit("/", 1)[0]
+        return self._poll(base, self._image_key, job_id)
+
     def _dispatch(self, runsync_endpoint: str, api_key: str, input_payload: dict,
                    on_submitted: Callable[[str], None] | None) -> dict:
         base = runsync_endpoint.rsplit("/", 1)[0]
@@ -48,6 +63,10 @@ class RunpodClient:
         if on_submitted is not None:
             on_submitted(job_id)
 
+        return self._poll(base, api_key, job_id)
+
+    def _poll(self, base: str, api_key: str, job_id: str) -> dict:
+        headers = {"Authorization": f"Bearer {api_key}"}
         status_url = f"{base}/status/{job_id}"
         for _ in range(self._max_poll_attempts):
             status_response = httpx.get(status_url, headers=headers, timeout=30)

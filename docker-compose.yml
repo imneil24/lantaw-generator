@@ -28,7 +28,9 @@ services:
     build: ./backend
     # Queue name must match QUEUE_NAME in backend/app/main.py — a mismatch
     # here means jobs get enqueued but no worker ever picks them up.
-    command: rq worker clip-image-jobs --url ${REDIS_URL}
+    # worker_entrypoint runs resume_orphaned_jobs() once before exec'ing
+    # into `rq worker` — see app/worker_entrypoint.py.
+    command: python -m app.worker_entrypoint clip-image-jobs --url ${REDIS_URL}
     env_file:
       - backend/.env
     depends_on:

@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Job, VideoProject, ProjectClip
-from app.queue import process_clip_job, process_image_job, _extract_output
+from app.queue import process_clip_job, process_image_job, resume_orphaned_jobs, _extract_output
 
 
 def test_extract_output_raises_on_completed_job_with_empty_output():
@@ -315,6 +315,99 @@ def test_maybe_stitch_project_failure_does_not_affect_clip_job_status():
     assert updated_job.status == "complete"  # clip job unaffected by stitch failure
     project = session.query(VideoProject).filter_by(id=project_id).one()
     assert project.status == "pending"  # stitch never completed, but nothing corrupted
+
+
+def test_resume_orphaned_jobs_finishes_a_clip_job_left_pending_by_a_dead_worker():
+    # Simulates a worker that dispatched to RunPod (runpod_job_id persisted),
+    # then crashed before its in-memory poll loop ever returned — the DB row
+    # is stuck at status="pending" with no code path left to advance it.
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending",
+                     retry_count=0, runpod_job_id="runpod-job-orphan"))
+    session.commit()
+
+    runpod_client = MagicMock()
+    runpod_client.poll_video.return_value = {"output": {"key": "clips/resumed.mp4"}}
+    r2_client = MagicMock()
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        resume_orphaned_jobs()
+
+    runpod_client.poll_video.assert_called_once_with("runpod-job-orphan")
+    runpod_client.dispatch_video.assert_not_called()  # must not resubmit a duplicate RunPod job
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "complete"
+    assert updated.result_key == "clips/resumed.mp4"
+
+
+def test_resume_orphaned_jobs_finishes_an_image_job_left_pending_by_a_dead_worker():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="pending",
+                     retry_count=0, runpod_job_id="runpod-job-orphan-img"))
+    session.commit()
+
+    runpod_client = MagicMock()
+    runpod_client.poll_image.return_value = {"output": {"key": "images/resumed.png", "bytes_b64": "AA=="}}
+    r2_client = MagicMock()
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        resume_orphaned_jobs()
+
+    runpod_client.poll_image.assert_called_once_with("runpod-job-orphan-img")
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "complete"
+    assert updated.result_key == "images/resumed.png"
+
+
+def test_resume_orphaned_jobs_ignores_fresh_never_dispatched_jobs():
+    # A brand-new job also has status="pending" but no runpod_job_id yet —
+    # must not be mistaken for an orphan and polled/resumed.
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
+    session.commit()
+
+    runpod_client = MagicMock()
+    r2_client = MagicMock()
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        resume_orphaned_jobs()
+
+    runpod_client.poll_video.assert_not_called()
+    runpod_client.poll_image.assert_not_called()
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "pending"  # untouched
+
+
+def test_resume_orphaned_jobs_marks_failed_without_aborting_the_rest_of_the_sweep():
+    session = _make_session()
+    failing_id = str(uuid.uuid4())
+    healthy_id = str(uuid.uuid4())
+    session.add(Job(id=failing_id, type="clip", prompt="p", duration=10.0, status="pending",
+                     retry_count=0, runpod_job_id="runpod-job-fails"))
+    session.add(Job(id=healthy_id, type="clip", prompt="p", duration=10.0, status="pending",
+                     retry_count=0, runpod_job_id="runpod-job-ok"))
+    session.commit()
+
+    runpod_client = MagicMock()
+    def fake_poll_video(runpod_job_id):
+        if runpod_job_id == "runpod-job-fails":
+            raise RuntimeError("RunPod job failed: boom")
+        return {"output": {"key": "clips/ok.mp4"}}
+    runpod_client.poll_video.side_effect = fake_poll_video
+    r2_client = MagicMock()
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        resume_orphaned_jobs()  # must not raise despite one orphan failing
+
+    failed_job = session.query(Job).filter_by(id=failing_id).one()
+    assert failed_job.status == "failed"
+    assert failed_job.retry_count == 1
+    healthy_job = session.query(Job).filter_by(id=healthy_id).one()
+    assert healthy_job.status == "complete"
+    assert healthy_job.result_key == "clips/ok.mp4"
 
 
 def test_process_image_job_marks_complete_on_success():
