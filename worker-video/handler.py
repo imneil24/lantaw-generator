@@ -9,6 +9,7 @@ from ltx_pipelines.distilled import DistilledPipeline
 from ltx_pipelines.utils.helpers import snap_frames_to_grid
 from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.model_paths import ModelPaths
+from ltx_pipelines.utils.types import OffloadMode
 
 # Two-stage pipelines (DistilledPipeline) require both dimensions divisible by
 # 64 (ltx_pipelines.utils.helpers.assert_resolution). 1088 is the standard
@@ -56,6 +57,12 @@ def _load_pipeline_impl() -> DistilledPipeline:
         model_paths=model_paths,
         spatial_upsampler_path=SPATIAL_UPSAMPLER_PATH,
         loras=[],
+        # Default OffloadMode.NONE keeps every component (transformer, text
+        # encoder, VAEs) resident on GPU at once — confirmed via a real OOM on
+        # a 32GB card (~30GB allocated with zero headroom for computation).
+        # CPU offloading trades some speed for the ~5GB VRAM / ~36GB RAM
+        # footprint documented in ltx_pipelines.utils.types.OffloadMode.
+        offload_mode=OffloadMode.CPU,
     )
 
 
