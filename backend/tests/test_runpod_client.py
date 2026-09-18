@@ -104,3 +104,47 @@ def test_dispatch_video_raises_on_non_200_submit(mock_post):
         assert False, "expected RuntimeError"
     except RuntimeError:
         pass
+
+
+@patch("app.runpod_client.httpx.get")
+@patch("app.runpod_client.httpx.post")
+def test_dispatch_video_passes_through_handler_error_on_completed_status(mock_post, mock_get):
+    # RunPod status can be COMPLETED even when the handler itself rejected
+    # the prompt (moderation/validation) rather than crashing — the handler's
+    # own {"error": ...} return must survive un-wrapped so queue.py's
+    # _extract_output sees the "error" key and raises a clean message
+    # instead of a KeyError on a missing "bytes_b64".
+    mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
+    mock_get.return_value = _mock_response(
+        200, {"id": "job-1", "status": "COMPLETED", "output": {"error": "prompt rejected by moderation"}}
+    )
+
+    client = RunpodClient(_fake_settings(), poll_interval=0)
+    result = client.dispatch_video(prompt="x", duration=5)
+
+    assert result == {"error": "prompt rejected by moderation"}
+
+
+@patch("app.runpod_client.httpx.get")
+@patch("app.runpod_client.httpx.post")
+def test_dispatch_video_calls_on_submitted_with_job_id_before_polling(mock_post, mock_get):
+    mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
+    mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "COMPLETED", "output": {"key": "clips/x.mp4"}})
+    seen = []
+
+    client = RunpodClient(_fake_settings(), poll_interval=0)
+    client.dispatch_video(prompt="x", duration=5, on_submitted=seen.append)
+
+    assert seen == ["job-1"]
+
+
+@patch("app.runpod_client.httpx.post")
+def test_dispatch_video_does_not_call_on_submitted_when_submit_fails(mock_post):
+    mock_post.return_value = _mock_response(500, "upstream error")
+    seen = []
+    client = RunpodClient(_fake_settings())
+    try:
+        client.dispatch_video(prompt="x", duration=5, on_submitted=seen.append)
+    except RuntimeError:
+        pass
+    assert seen == []

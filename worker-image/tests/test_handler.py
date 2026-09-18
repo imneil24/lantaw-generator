@@ -26,9 +26,11 @@ def test_handler_returns_expected_output_shape(monkeypatch):
 
     monkeypatch.setattr("handler._generate_image", fake_generate)
     result = handler({"input": {"prompt": "a red fox"}})
-    assert "output" in result
-    assert result["output"]["key"].startswith("images/")
-    assert "bytes_b64" in result["output"]
+    # RunPod's serverless SDK wraps whatever the handler returns as the
+    # job's own "output" field — returning {"output": {...}} here would
+    # double-wrap it, so the handler returns the payload directly.
+    assert result["key"].startswith("images/")
+    assert "bytes_b64" in result
 
 
 def test_handler_returns_error_on_invalid_input():

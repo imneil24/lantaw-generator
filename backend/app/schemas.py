@@ -20,6 +20,7 @@ class JobResponse(BaseModel):
     result_url: str | None = None
     created_at: datetime
     queue_position: int | None = None
+    runpod_job_id: str | None = None
 
 
 class ProjectResponse(BaseModel):

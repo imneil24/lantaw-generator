@@ -19,8 +19,8 @@ def _build_app_with_data():
     session = Session()
 
     job_id = str(uuid.uuid4())
-    session.add(Job(id=job_id, type="image", prompt="p",
-                     duration=None, status="complete", retry_count=0, result_key="images/x.png"))
+    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="complete",
+                     retry_count=0, result_key="images/x.png", runpod_job_id="runpod-abc"))
 
     project_id = str(uuid.uuid4())
     session.add(VideoProject(id=project_id, target_duration=10.0,
@@ -49,6 +49,7 @@ def test_get_job_returns_signed_url():
     body = response.json()
     assert body["status"] == "complete"
     assert body["result_url"] == "https://signed.example.com/images/x.png"
+    assert body["runpod_job_id"] == "runpod-abc"
 
 
 def test_get_job_completed_job_has_no_queue_position():

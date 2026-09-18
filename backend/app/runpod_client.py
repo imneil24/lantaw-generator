@@ -1,4 +1,5 @@
 import time
+from typing import Callable
 
 import httpx
 
@@ -12,15 +13,16 @@ class RunpodClient:
         self._poll_interval = poll_interval
         self._max_poll_attempts = max_poll_attempts
 
-    def dispatch_video(self, prompt: str, duration: float) -> dict:
+    def dispatch_video(self, prompt: str, duration: float, on_submitted: Callable[[str], None] | None = None) -> dict:
         return self._dispatch(
-            self._video_endpoint, self._video_key, {"prompt": prompt, "duration": duration}
+            self._video_endpoint, self._video_key, {"prompt": prompt, "duration": duration}, on_submitted,
         )
 
-    def dispatch_image(self, prompt: str) -> dict:
-        return self._dispatch(self._image_endpoint, self._image_key, {"prompt": prompt})
+    def dispatch_image(self, prompt: str, on_submitted: Callable[[str], None] | None = None) -> dict:
+        return self._dispatch(self._image_endpoint, self._image_key, {"prompt": prompt}, on_submitted)
 
-    def _dispatch(self, runsync_endpoint: str, api_key: str, input_payload: dict) -> dict:
+    def _dispatch(self, runsync_endpoint: str, api_key: str, input_payload: dict,
+                   on_submitted: Callable[[str], None] | None) -> dict:
         base = runsync_endpoint.rsplit("/", 1)[0]
         headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -28,6 +30,8 @@ class RunpodClient:
         if response.status_code != 200:
             raise RuntimeError(f"RunPod job submission failed: status={response.status_code}")
         job_id = response.json()["id"]
+        if on_submitted is not None:
+            on_submitted(job_id)
 
         status_url = f"{base}/status/{job_id}"
         for _ in range(self._max_poll_attempts):
@@ -37,7 +41,10 @@ class RunpodClient:
             payload = status_response.json()
             status = payload["status"]
             if status == "COMPLETED":
-                return {"output": payload["output"]}
+                handler_output = payload["output"]
+                if isinstance(handler_output, dict) and "error" in handler_output:
+                    return handler_output
+                return {"output": handler_output}
             if status == "FAILED":
                 raise RuntimeError(f"RunPod job failed: {payload.get('error', payload)}")
             time.sleep(self._poll_interval)

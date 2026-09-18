@@ -32,6 +32,29 @@ def test_process_clip_job_marks_complete_on_success():
     assert updated.result_key == "clips/x.mp4"
 
 
+def test_process_clip_job_persists_runpod_job_id_as_soon_as_submitted():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
+    session.commit()
+
+    def fake_dispatch_video(prompt, duration, on_submitted=None):
+        if on_submitted is not None:
+            on_submitted("runpod-job-abc")
+        return {"output": {"key": "clips/x.mp4", "bytes_b64": "AA=="}}
+
+    runpod_client = MagicMock()
+    runpod_client.dispatch_video.side_effect = fake_dispatch_video
+    r2_client = MagicMock()
+    r2_client.upload.return_value = "clips/x.mp4"
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        process_clip_job(job_id)
+
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.runpod_job_id == "runpod-job-abc"
+
+
 def test_process_clip_job_marks_failed_and_reraises_when_rq_has_no_retries_left():
     session = _make_session()
     job_id = str(uuid.uuid4())

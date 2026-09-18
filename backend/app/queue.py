@@ -147,8 +147,14 @@ def process_clip_job(job_id: str) -> None:
         if job.status == "complete":
             return  # redelivered/duplicate job; already processed
 
+        def _persist_runpod_job_id(runpod_job_id: str) -> None:
+            job.runpod_job_id = runpod_job_id
+            session.commit()
+
         try:
-            result = runpod_client.dispatch_video(prompt=job.prompt, duration=job.duration)
+            result = runpod_client.dispatch_video(
+                prompt=job.prompt, duration=job.duration, on_submitted=_persist_runpod_job_id,
+            )
             output = _extract_output(result)
             raw_bytes = base64.b64decode(output["bytes_b64"])
             key = output["key"]
@@ -176,8 +182,12 @@ def process_image_job(job_id: str) -> None:
         if job.status == "complete":
             return  # redelivered/duplicate job; already processed
 
+        def _persist_runpod_job_id(runpod_job_id: str) -> None:
+            job.runpod_job_id = runpod_job_id
+            session.commit()
+
         try:
-            result = runpod_client.dispatch_image(prompt=job.prompt)
+            result = runpod_client.dispatch_image(prompt=job.prompt, on_submitted=_persist_runpod_job_id)
             output = _extract_output(result)
             raw_bytes = base64.b64decode(output["bytes_b64"])
             key = output["key"]

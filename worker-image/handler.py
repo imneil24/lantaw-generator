@@ -69,4 +69,4 @@ def handler(job: dict) -> dict:
 
     image_bytes = _generate_image(prompt)
     key = f"images/{uuid.uuid4().hex}.png"
-    return {"output": {"key": key, "bytes_b64": base64.b64encode(image_bytes).decode("ascii")}}
+    return {"key": key, "bytes_b64": base64.b64encode(image_bytes).decode("ascii")}

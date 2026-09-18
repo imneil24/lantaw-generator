@@ -27,7 +27,8 @@ def get_job(job_id: str, session=Depends(get_db_session), r2_client=Depends(get_
         ).count()
 
     return JobResponse(id=job.id, type=job.type, status=job.status, result_url=result_url,
-                        created_at=job.created_at, queue_position=queue_position)
+                        created_at=job.created_at, queue_position=queue_position,
+                        runpod_job_id=job.runpod_job_id)
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)

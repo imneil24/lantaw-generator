@@ -151,4 +151,4 @@ def handler(job: dict) -> dict:
 
     video_bytes = _generate_video(prompt, duration)
     key = f"clips/{uuid.uuid4().hex}.mp4"
-    return {"output": {"key": key, "bytes_b64": base64.b64encode(video_bytes).decode("ascii")}}
+    return {"key": key, "bytes_b64": base64.b64encode(video_bytes).decode("ascii")}

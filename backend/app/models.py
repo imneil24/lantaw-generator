@@ -17,6 +17,7 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     result_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    runpod_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
