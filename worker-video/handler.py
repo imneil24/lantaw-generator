@@ -101,34 +101,35 @@ def _generate_video(prompt: str, duration: float) -> bytes:
     # snap_frames_to_grid rounds down to the nearest valid value.
     num_frames = snap_frames_to_grid(round(duration * FPS))
 
-    # LTX-2's own CLI entrypoint (ltx_pipelines.distilled.main) wraps the
-    # whole pipeline call in torch.inference_mode(). Without it, tensors the
-    # library creates internally under an inference-mode context (e.g. during
-    # prompt encoding) get mixed with default-mode autograd tracking in later
-    # denoising steps, which torch rejects: "Inference tensors cannot be
-    # saved for backward."
-    with torch.inference_mode():
-        result = pipeline(
-            prompt=prompt,
-            seed=int.from_bytes(os.urandom(4), "big"),
-            height=RESOLUTION_HEIGHT,
-            width=RESOLUTION_WIDTH,
-            frame_rate=FPS,
-            images=[],
-            num_frames=num_frames,
-        )
-
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
         output_path = tmp_file.name
 
     try:
-        encode_video(
-            video=result.video,
-            fps=FPS,
-            audio=result.audio,
-            output_path=output_path,
-            video_chunks_number=get_video_chunks_number(result.num_frames, result.tiling_config),
-        )
+        # LTX-2's own CLI entrypoint (ltx_pipelines.distilled.main) wraps the
+        # whole pipeline call *and* the encode_video call in torch.inference_mode().
+        # result.video is a lazy iterator: the actual VAE decode tensor ops run
+        # when encode_video pulls from it, not when pipeline() returns — closing
+        # the inference_mode context beforehand left that decode step running in
+        # default (autograd-tracking) mode, which torch rejects when it touches
+        # tensors created earlier under inference_mode: "Inference tensors cannot
+        # be saved for backward."
+        with torch.inference_mode():
+            result = pipeline(
+                prompt=prompt,
+                seed=int.from_bytes(os.urandom(4), "big"),
+                height=RESOLUTION_HEIGHT,
+                width=RESOLUTION_WIDTH,
+                frame_rate=FPS,
+                images=[],
+                num_frames=num_frames,
+            )
+            encode_video(
+                video=result.video,
+                fps=FPS,
+                audio=result.audio,
+                output_path=output_path,
+                video_chunks_number=get_video_chunks_number(result.num_frames, result.tiling_config),
+            )
         with open(output_path, "rb") as f:
             return f.read()
     finally:
