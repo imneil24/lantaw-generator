@@ -12,6 +12,7 @@ import sys
 
 from app.logging_conf import configure_logging
 from app.config import get_settings
+from app.db import get_engine, apply_column_additions
 from app.queue import resume_orphaned_jobs
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,14 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.all_secrets())
+
+    # The backend service normally owns schema setup (Base.metadata.
+    # create_all + apply_column_additions in main.py), but this worker can
+    # boot and query Job rows (resume_orphaned_jobs, below) before or
+    # without a backend deploy ever having run against this database —
+    # applying column additions here too keeps the worker resilient to
+    # that ordering instead of assuming the backend already ran first.
+    apply_column_additions(get_engine(settings.postgres_dsn))
 
     logger.info("resuming orphaned jobs before starting rq worker")
     resume_orphaned_jobs()

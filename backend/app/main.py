@@ -7,7 +7,7 @@ from rq import Queue, Retry
 
 from app.config import get_settings
 from app.logging_conf import configure_logging
-from app.db import get_engine, session_factory
+from app.db import get_engine, session_factory, apply_column_additions
 from app.models import Base
 from app.moderation import KeywordModerationProvider
 from app.r2 import R2Client
@@ -28,6 +28,7 @@ def create_app() -> FastAPI:
 
     engine = get_engine(settings.postgres_dsn)
     Base.metadata.create_all(engine)
+    apply_column_additions(engine)
     Session = session_factory(engine)
 
     moderation = KeywordModerationProvider()
