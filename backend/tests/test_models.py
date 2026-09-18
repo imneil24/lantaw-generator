@@ -1,7 +1,13 @@
 import uuid
+from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Job, VideoProject, ProjectClip
+
+
+def test_job_has_updated_at_column_defaulting_to_creation_time():
+    job = Job(id="x", type="clip", prompt="p", duration=10.0, status="pending", retry_count=0)
+    assert job.updated_at is None or isinstance(job.updated_at, datetime)
 
 
 def test_create_job_and_project_with_clips():

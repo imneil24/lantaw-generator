@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     postgres_dsn: str
     redis_url: str
     backend_api_key_hash: str
-    webhook_url: str
+    public_base_url: str
+    runpod_webhook_secret: str
     moderation_api_key: str | None = None
 
     def all_secrets(self) -> list[str]:
@@ -26,7 +27,7 @@ class Settings(BaseSettings):
             self.runpod_video_key, self.runpod_image_key,
             self.r2_write_secret, self.r2_read_secret,
             self.postgres_dsn, self.redis_url,
-            self.backend_api_key_hash, self.webhook_url,
+            self.backend_api_key_hash, self.runpod_webhook_secret,
         ]
 
 

@@ -18,7 +18,18 @@ def _set_env(monkeypatch, tmp_path):
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     from app.security import hash_api_key
     monkeypatch.setenv("BACKEND_API_KEY_HASH", hash_api_key("test-key"))
-    monkeypatch.setenv("WEBHOOK_URL", "https://hooks.example.com/x")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://api.example.com")
+    monkeypatch.setenv("RUNPOD_WEBHOOK_SECRET", "test-webhook-secret")
+
+
+def test_settings_loads_public_base_url_and_runpod_webhook_secret(monkeypatch, tmp_path):
+    _set_env(monkeypatch, tmp_path)
+    from app.config import get_settings
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.public_base_url == "https://api.example.com"
+    assert settings.runpod_webhook_secret == "test-webhook-secret"
+    assert settings.runpod_webhook_secret in settings.all_secrets()
 
 
 def test_unauthenticated_request_rejected(monkeypatch, tmp_path):
