@@ -19,6 +19,7 @@ class JobResponse(BaseModel):
     status: str
     result_url: str | None = None
     created_at: datetime
+    queue_position: int | None = None
 
 
 class ProjectResponse(BaseModel):

@@ -64,7 +64,11 @@ def create_app() -> FastAPI:
             # process_image_job rebuild their own DB session and API clients
             # from env-derived Settings rather than receiving live,
             # unpicklable connections as arguments.
-            job_queue.enqueue(target, job_id, retry=Retry(max=MAX_RETRIES))
+            # RQ's default job_timeout (180s) is shorter than RunpodClient's
+            # own poll budget (up to ~600s for video), so RQ would kill the
+            # job mid-poll and count it as a crashed worker rather than
+            # letting RunpodClient's own TimeoutError surface cleanly.
+            job_queue.enqueue(target, job_id, retry=Retry(max=MAX_RETRIES), job_timeout=900)
         return enqueue
 
     app.include_router(generate_image.router)

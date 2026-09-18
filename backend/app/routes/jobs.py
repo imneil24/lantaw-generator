@@ -19,7 +19,15 @@ def get_job(job_id: str, session=Depends(get_db_session), r2_client=Depends(get_
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     result_url = r2_client.signed_url(job.result_key) if job.result_key else None
-    return JobResponse(id=job.id, type=job.type, status=job.status, result_url=result_url, created_at=job.created_at)
+
+    queue_position = None
+    if job.status == "pending":
+        queue_position = session.query(Job).filter(
+            Job.type == job.type, Job.status == "pending", Job.created_at < job.created_at,
+        ).count()
+
+    return JobResponse(id=job.id, type=job.type, status=job.status, result_url=result_url,
+                        created_at=job.created_at, queue_position=queue_position)
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)

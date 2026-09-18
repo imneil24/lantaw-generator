@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -48,6 +49,34 @@ def test_get_job_returns_signed_url():
     body = response.json()
     assert body["status"] == "complete"
     assert body["result_url"] == "https://signed.example.com/images/x.png"
+
+
+def test_get_job_completed_job_has_no_queue_position():
+    app, job_id, _ = _build_app_with_data()
+    client = TestClient(app)
+    response = client.get(f"/jobs/{job_id}", headers={"X-Api-Key-Id": "primary"})
+    assert response.json()["queue_position"] is None
+
+
+def test_get_job_pending_job_reports_queue_position():
+    app, _, _ = _build_app_with_data()
+    session = app.dependency_overrides[get_db_session]()
+    now = datetime.now(timezone.utc)
+
+    ahead_id = str(uuid.uuid4())
+    session.add(Job(id=ahead_id, type="image", prompt="p", duration=None,
+                     status="pending", retry_count=0, created_at=now - timedelta(minutes=2)))
+    target_id = str(uuid.uuid4())
+    session.add(Job(id=target_id, type="image", prompt="p", duration=None,
+                     status="pending", retry_count=0, created_at=now - timedelta(minutes=1)))
+    behind_id = str(uuid.uuid4())
+    session.add(Job(id=behind_id, type="image", prompt="p", duration=None,
+                     status="pending", retry_count=0, created_at=now))
+    session.commit()
+
+    client = TestClient(app)
+    response = client.get(f"/jobs/{target_id}", headers={"X-Api-Key-Id": "primary"})
+    assert response.json()["queue_position"] == 1
 
 
 def test_get_job_unknown_id_returns_404():
