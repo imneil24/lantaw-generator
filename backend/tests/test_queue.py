@@ -20,9 +20,8 @@ def test_process_clip_job_marks_complete_on_success():
     session.commit()
 
     runpod_client = MagicMock()
-    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/x.mp4", "bytes_b64": "AA=="}}
+    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/x.mp4"}}
     r2_client = MagicMock()
-    r2_client.upload.return_value = "clips/x.mp4"
 
     with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
         process_clip_job(job_id)
@@ -30,6 +29,11 @@ def test_process_clip_job_marks_complete_on_success():
     updated = session.query(Job).filter_by(id=job_id).one()
     assert updated.status == "complete"
     assert updated.result_key == "clips/x.mp4"
+    # worker-video/handler.py uploads the clip to R2 itself and returns only
+    # the key — a full HD video base64-encoded into the job result is too
+    # large for RunPod's own /job-done callback (rejected with a 400), so
+    # the backend must not expect or re-upload raw bytes for video jobs.
+    r2_client.upload.assert_not_called()
 
 
 def test_process_clip_job_persists_runpod_job_id_as_soon_as_submitted():
@@ -41,12 +45,11 @@ def test_process_clip_job_persists_runpod_job_id_as_soon_as_submitted():
     def fake_dispatch_video(prompt, duration, on_submitted=None):
         if on_submitted is not None:
             on_submitted("runpod-job-abc")
-        return {"output": {"key": "clips/x.mp4", "bytes_b64": "AA=="}}
+        return {"output": {"key": "clips/x.mp4"}}
 
     runpod_client = MagicMock()
     runpod_client.dispatch_video.side_effect = fake_dispatch_video
     r2_client = MagicMock()
-    r2_client.upload.return_value = "clips/x.mp4"
 
     with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
         process_clip_job(job_id)
@@ -147,9 +150,8 @@ def test_process_clip_job_triggers_stitch_when_last_clip_in_project_completes(tm
     session.commit()
 
     runpod_client = MagicMock()
-    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/b.mp4", "bytes_b64": "AA=="}}
+    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/b.mp4"}}
     r2_client = MagicMock()
-    r2_client.upload.return_value = "clips/b.mp4"
     r2_client.download.return_value = b"fake-clip-bytes"
 
     def fake_stitch(clip_paths, audio_path, output_path):
@@ -163,7 +165,9 @@ def test_process_clip_job_triggers_stitch_when_last_clip_in_project_completes(tm
     project = session.query(VideoProject).filter_by(id=project_id).one()
     assert project.status == "complete"
     assert project.final_result_key is not None
-    assert r2_client.upload.call_count == 2  # clip upload + final stitched video upload
+    # worker-video/handler.py uploads each clip to R2 itself; the backend
+    # only uploads the stitched final video.
+    assert r2_client.upload.call_count == 1
 
 
 def test_process_clip_job_does_not_stitch_when_sibling_clips_still_pending():
@@ -181,9 +185,8 @@ def test_process_clip_job_does_not_stitch_when_sibling_clips_still_pending():
     session.commit()
 
     runpod_client = MagicMock()
-    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/a.mp4", "bytes_b64": "AA=="}}
+    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/a.mp4"}}
     r2_client = MagicMock()
-    r2_client.upload.return_value = "clips/a.mp4"
 
     with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)), \
          patch("app.queue.stitch_project") as mock_stitch:

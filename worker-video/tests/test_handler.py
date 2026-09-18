@@ -2,7 +2,7 @@ import threading
 import time
 import pytest
 import handler as handler_module
-from handler import validate_input, select_model_variant, handler
+from handler import validate_input, handler
 
 
 def test_validate_input_accepts_valid_payload():
@@ -28,25 +28,31 @@ def test_validate_input_rejects_out_of_range_duration():
         validate_input({"prompt": "x", "duration": 25})
 
 
-def test_select_model_variant_routes_by_duration():
-    assert select_model_variant(10) == "ltx-2-3-pro"
-    assert select_model_variant(10.0) == "ltx-2-3-pro"
-    assert select_model_variant(15) == "ltx-2-3-fast"
-    assert select_model_variant(20) == "ltx-2-3-fast"
+def test_handler_uploads_to_r2_and_returns_key_only(monkeypatch):
+    uploaded = {}
 
-
-def test_handler_returns_expected_output_shape(monkeypatch):
-    def fake_generate(prompt, duration, variant):
+    def fake_generate(prompt, duration):
         return b"fake-video-bytes"
 
+    def fake_upload(key, data, content_type):
+        uploaded["key"] = key
+        uploaded["data"] = data
+        uploaded["content_type"] = content_type
+
     monkeypatch.setattr("handler._generate_video", fake_generate)
+    monkeypatch.setattr("handler._upload_to_r2", fake_upload)
     result = handler({"input": {"prompt": "a cat", "duration": 8}})
     # RunPod's serverless SDK wraps whatever the handler returns as the
     # job's own "output" field — returning {"output": {...}} here would
     # double-wrap it, so the handler returns the payload directly.
-    assert "key" in result
-    assert result["key"].startswith("clips/")
-    assert "bytes_b64" in result
+    # The clip itself is uploaded to R2 directly from the worker (RunPod's
+    # own /job-done callback rejects payloads this large with a 400 —
+    # base64-encoding a full HD video into the job result exceeds RunPod's
+    # sync result size limit), so the handler returns only the key, no bytes.
+    assert result == {"key": uploaded["key"]}
+    assert uploaded["key"].startswith("clips/")
+    assert uploaded["data"] == b"fake-video-bytes"
+    assert uploaded["content_type"] == "video/mp4"
 
 
 def test_handler_returns_error_on_invalid_input():
@@ -55,7 +61,7 @@ def test_handler_returns_error_on_invalid_input():
 
 
 def test_handler_rejects_blocked_prompt_without_calling_generate(monkeypatch):
-    def fail_if_called(prompt, duration, variant):
+    def fail_if_called(prompt, duration):
         raise AssertionError("_generate_video should not be called for a blocked prompt")
 
     monkeypatch.setattr("handler._generate_video", fail_if_called)
@@ -63,8 +69,8 @@ def test_handler_rejects_blocked_prompt_without_calling_generate(monkeypatch):
     assert "error" in result
 
 
-def test_load_model_is_thread_safe_under_concurrent_calls(monkeypatch):
-    monkeypatch.setattr(handler_module, "_MODEL", None)
+def test_load_pipeline_is_thread_safe_under_concurrent_calls(monkeypatch):
+    monkeypatch.setattr(handler_module, "_PIPELINE", None)
     call_count = {"n": 0}
 
     def counting_slow_init():
@@ -72,9 +78,9 @@ def test_load_model_is_thread_safe_under_concurrent_calls(monkeypatch):
         time.sleep(0.05)  # widen the race window so an unlocked bug would show up
         return {"loaded": True}
 
-    monkeypatch.setattr(handler_module, "_load_model_impl", counting_slow_init)
+    monkeypatch.setattr(handler_module, "_load_pipeline_impl", counting_slow_init)
 
-    threads = [threading.Thread(target=handler_module.load_model) for _ in range(10)]
+    threads = [threading.Thread(target=handler_module.load_pipeline) for _ in range(10)]
     for t in threads:
         t.start()
     for t in threads:

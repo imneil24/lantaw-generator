@@ -156,11 +156,13 @@ def process_clip_job(job_id: str) -> None:
                 prompt=job.prompt, duration=job.duration, on_submitted=_persist_runpod_job_id,
             )
             output = _extract_output(result)
-            raw_bytes = base64.b64decode(output["bytes_b64"])
-            key = output["key"]
-            r2_client.upload(key, raw_bytes, "video/mp4")
+            # The worker uploads the clip to R2 itself and returns only the
+            # key (see worker-video/handler.py) — a full HD video
+            # base64-encoded into the job result is too large for RunPod's
+            # own /job-done callback, which rejects it with a 400 before the
+            # backend ever sees a completed job.
             job.status = "complete"
-            job.result_key = key
+            job.result_key = output["key"]
             session.commit()
         except Exception as exc:
             _handle_failure(session, job, exc)

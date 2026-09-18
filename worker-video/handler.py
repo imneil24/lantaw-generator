@@ -1,9 +1,9 @@
-import base64
 import os
 import tempfile
 import threading
 import uuid
 
+import boto3
 import torch
 
 from ltx_core.model.video_vae import get_video_chunks_number
@@ -46,6 +46,28 @@ def _is_blocked(prompt: str) -> bool:
 
 _PIPELINE = None
 _PIPELINE_LOCK = threading.Lock()
+
+_R2_CLIENT = None
+
+
+def _get_r2_client():
+    # Built lazily (not at import time) so the moderation/validation tests
+    # can run without R2 credentials set.
+    global _R2_CLIENT
+    if _R2_CLIENT is None:
+        _R2_CLIENT = boto3.client(
+            "s3",
+            endpoint_url=os.environ["R2_ENDPOINT"],
+            aws_access_key_id=os.environ["R2_WRITE_KEY"],
+            aws_secret_access_key=os.environ["R2_WRITE_SECRET"],
+        )
+    return _R2_CLIENT
+
+
+def _upload_to_r2(key: str, data: bytes, content_type: str) -> None:
+    _get_r2_client().put_object(
+        Bucket=os.environ["R2_BUCKET"], Key=key, Body=data, ContentType=content_type,
+    )
 
 
 def _load_pipeline_impl() -> DistilledPipeline:
@@ -151,4 +173,9 @@ def handler(job: dict) -> dict:
 
     video_bytes = _generate_video(prompt, duration)
     key = f"clips/{uuid.uuid4().hex}.mp4"
-    return {"key": key, "bytes_b64": base64.b64encode(video_bytes).decode("ascii")}
+    # Uploaded directly from the worker rather than returned as bytes_b64:
+    # RunPod's own /job-done callback rejects a full HD video base64-encoded
+    # into the job result with a 400 (exceeds RunPod's sync result size
+    # limit), so the backend never sees a completed job at all.
+    _upload_to_r2(key, video_bytes, "video/mp4")
+    return {"key": key}
