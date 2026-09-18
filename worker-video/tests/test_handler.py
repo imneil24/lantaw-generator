@@ -55,6 +55,22 @@ def test_handler_uploads_to_r2_and_returns_key_only(monkeypatch):
     assert uploaded["content_type"] == "video/mp4"
 
 
+def test_handler_logs_before_and_after_r2_upload(monkeypatch, capsys):
+    # RunPod's own container can die/restart mid-job with no exception ever
+    # logged (confirmed via RunPod's own logs: "Video saved" followed
+    # immediately by "Failed to return job results | 400" with no traceback
+    # in between) — these log lines are the only way to tell, after the
+    # fact, whether _upload_to_r2 was ever reached and whether it finished.
+    monkeypatch.setattr("handler._generate_video", lambda prompt, duration: b"fake-video-bytes")
+    monkeypatch.setattr("handler._upload_to_r2", lambda key, data, content_type: None)
+
+    handler({"input": {"prompt": "a cat", "duration": 8}})
+
+    output = capsys.readouterr().out
+    assert "uploading to r2" in output.lower()
+    assert "r2 upload complete" in output.lower()
+
+
 def test_handler_returns_error_on_invalid_input():
     result = handler({"input": {"duration": 8}})
     assert "error" in result

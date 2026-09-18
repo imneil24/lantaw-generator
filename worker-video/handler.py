@@ -177,5 +177,15 @@ def handler(job: dict) -> dict:
     # RunPod's own /job-done callback rejects a full HD video base64-encoded
     # into the job result with a 400 (exceeds RunPod's sync result size
     # limit), so the backend never sees a completed job at all.
+    #
+    # These prints exist because RunPod's own container has been observed
+    # dying/restarting mid-job with no exception ever logged — "Video saved"
+    # followed immediately by RunPod's own "Failed to return job results |
+    # 400" with nothing in between. Without a log line bracketing the
+    # upload call, there is no way to tell after the fact whether
+    # _upload_to_r2 ever ran or whether it completed before the container
+    # died.
+    print(f"uploading to R2: key={key}")
     _upload_to_r2(key, video_bytes, "video/mp4")
+    print(f"R2 upload complete: key={key}")
     return {"key": key}
