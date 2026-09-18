@@ -15,6 +15,14 @@ def _mock_response(status_code=200, body=None):
     return MagicMock(status_code=status_code, json=lambda: body, text=str(body))
 
 
+def test_default_poll_ceiling_covers_observed_generation_time():
+    # Real LTX-2.5 generation has been observed taking 8-13 minutes; the
+    # default poll ceiling must clear that with margin so our own client
+    # doesn't time out jobs that are still running fine on RunPod's side.
+    client = RunpodClient(_fake_settings())
+    assert client._poll_interval * client._max_poll_attempts >= 15 * 60
+
+
 @patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
 def test_dispatch_video_submits_to_run_endpoint(mock_post, mock_get):

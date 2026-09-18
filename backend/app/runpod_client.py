@@ -5,7 +5,12 @@ import httpx
 
 
 class RunpodClient:
-    def __init__(self, settings, poll_interval: float = 5, max_poll_attempts: int = 120):
+    # 240 attempts * 5s = 20 minutes: real LTX-2.5 video generation (text
+    # encode, transformer denoise, spatial upscale, VAE decode) has been
+    # observed taking 8-13 minutes end to end, so the previous 10-minute
+    # ceiling raced RunPod's own executionTimeout and lost, aborting jobs
+    # that were still running fine on RunPod's side.
+    def __init__(self, settings, poll_interval: float = 5, max_poll_attempts: int = 240):
         self._video_key = settings.runpod_video_key
         self._image_key = settings.runpod_image_key
         self._video_endpoint = settings.runpod_video_endpoint
