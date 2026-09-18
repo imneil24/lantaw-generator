@@ -25,6 +25,26 @@ def test_default_poll_ceiling_covers_observed_generation_time():
 
 @patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
+def test_dispatch_video_sets_execution_timeout_policy_matching_poll_ceiling(mock_post, mock_get):
+    # RunPod applies its own (undocumented, often too short) default
+    # executionTimeout when a request doesn't specify one, which was
+    # killing jobs mid-run with a 400 on RunPod's own /job-done callback
+    # even though the handler was still actively generating — RunPod then
+    # reports that as "executionTimeout exceeded". Setting policy.executionTimeout
+    # explicitly, in milliseconds, overrides RunPod's default for this job.
+    mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
+    mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "COMPLETED", "output": {"key": "clips/x.mp4"}})
+
+    client = RunpodClient(_fake_settings())
+    client.dispatch_video(prompt="a river at dawn", duration=8)
+
+    args, kwargs = mock_post.call_args
+    expected_ms = client._poll_interval * client._max_poll_attempts * 1000
+    assert kwargs["json"]["policy"]["executionTimeout"] == expected_ms
+
+
+@patch("app.runpod_client.httpx.get")
+@patch("app.runpod_client.httpx.post")
 def test_dispatch_video_submits_to_run_endpoint(mock_post, mock_get):
     mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
     mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "COMPLETED", "output": {"key": "clips/x.mp4"}})

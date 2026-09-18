@@ -31,7 +31,17 @@ class RunpodClient:
         base = runsync_endpoint.rsplit("/", 1)[0]
         headers = {"Authorization": f"Bearer {api_key}"}
 
-        response = httpx.post(f"{base}/run", json={"input": input_payload}, headers=headers, timeout=30)
+        # RunPod applies its own (undocumented, often shorter than expected)
+        # default executionTimeout when a request doesn't specify one —
+        # that default was killing jobs mid-run with a 400 on RunPod's own
+        # /job-done callback even though the handler was still actively
+        # generating, then reporting the failure as "executionTimeout
+        # exceeded". Setting policy.executionTimeout (milliseconds)
+        # explicitly, matching our own poll ceiling, overrides that default
+        # for this job so RunPod's own timeout can't fire before ours does.
+        execution_timeout_ms = self._poll_interval * self._max_poll_attempts * 1000
+        body = {"input": input_payload, "policy": {"executionTimeout": execution_timeout_ms}}
+        response = httpx.post(f"{base}/run", json=body, headers=headers, timeout=30)
         if response.status_code != 200:
             raise RuntimeError(f"RunPod job submission failed: status={response.status_code}")
         job_id = response.json()["id"]
