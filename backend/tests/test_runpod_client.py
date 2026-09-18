@@ -8,6 +8,8 @@ def _fake_settings():
         runpod_image_key="image-key",
         runpod_video_endpoint="https://api.runpod.ai/v2/vid/runsync",
         runpod_image_endpoint="https://api.runpod.ai/v2/img/runsync",
+        public_base_url="https://api.example.com",
+        runpod_webhook_secret="s3cr3t",
     )
 
 
@@ -23,9 +25,8 @@ def test_default_poll_ceiling_covers_observed_generation_time():
     assert client._poll_interval * client._max_poll_attempts >= 15 * 60
 
 
-@patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
-def test_dispatch_video_sets_execution_timeout_policy_matching_poll_ceiling(mock_post, mock_get):
+def test_dispatch_video_sets_execution_timeout_policy_matching_poll_ceiling(mock_post):
     # RunPod applies its own (undocumented, often too short) default
     # executionTimeout when a request doesn't specify one, which was
     # killing jobs mid-run with a 400 on RunPod's own /job-done callback
@@ -33,94 +34,64 @@ def test_dispatch_video_sets_execution_timeout_policy_matching_poll_ceiling(mock
     # reports that as "executionTimeout exceeded". Setting policy.executionTimeout
     # explicitly, in milliseconds, overrides RunPod's default for this job.
     mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
-    mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "COMPLETED", "output": {"key": "clips/x.mp4"}})
 
     client = RunpodClient(_fake_settings())
-    client.dispatch_video(prompt="a river at dawn", duration=8)
+    client.dispatch_video(prompt="a river at dawn", duration=8, job_id="j")
 
     args, kwargs = mock_post.call_args
     expected_ms = client._poll_interval * client._max_poll_attempts * 1000
     assert kwargs["json"]["policy"]["executionTimeout"] == expected_ms
 
 
-@patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
-def test_dispatch_video_submits_to_run_endpoint(mock_post, mock_get):
+def test_dispatch_video_submits_to_run_endpoint(mock_post):
     mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
-    mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "COMPLETED", "output": {"key": "clips/x.mp4"}})
 
     client = RunpodClient(_fake_settings())
-    client.dispatch_video(prompt="a river at dawn", duration=8)
+    client.dispatch_video(prompt="a river at dawn", duration=8, job_id="j")
 
     args, kwargs = mock_post.call_args
     assert args[0] == "https://api.runpod.ai/v2/vid/run"
     assert kwargs["json"]["input"] == {"prompt": "a river at dawn", "duration": 8}
     assert kwargs["headers"]["Authorization"] == "Bearer video-key"
+    assert "webhook" in kwargs["json"]
 
 
-@patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
-def test_dispatch_video_polls_status_until_completed(mock_post, mock_get):
+def test_dispatch_video_includes_webhook_url_scoped_to_the_job(mock_post):
     mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
-    mock_get.side_effect = [
-        _mock_response(200, {"id": "job-1", "status": "IN_PROGRESS"}),
-        _mock_response(200, {"id": "job-1", "status": "COMPLETED", "output": {"key": "clips/x.mp4"}}),
-    ]
 
-    client = RunpodClient(_fake_settings(), poll_interval=0)
-    result = client.dispatch_video(prompt="a river at dawn", duration=8)
+    client = RunpodClient(_fake_settings())
+    client.dispatch_video(prompt="a river at dawn", duration=8, job_id="our-job-42")
 
-    assert result == {"output": {"key": "clips/x.mp4"}}
-    assert mock_get.call_count == 2
-    status_args, status_kwargs = mock_get.call_args
-    assert status_args[0] == "https://api.runpod.ai/v2/vid/status/job-1"
-    assert status_kwargs["headers"]["Authorization"] == "Bearer video-key"
+    args, kwargs = mock_post.call_args
+    assert kwargs["json"]["webhook"] == "https://api.example.com/webhooks/runpod/s3cr3t/our-job-42"
 
 
 @patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
-def test_dispatch_video_raises_on_failed_status(mock_post, mock_get):
+def test_dispatch_video_returns_immediately_without_polling(mock_post, mock_get):
     mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
-    mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "FAILED", "error": "OOM"})
 
-    client = RunpodClient(_fake_settings(), poll_interval=0)
-    try:
-        client.dispatch_video(prompt="x", duration=5)
-        assert False, "expected RuntimeError"
-    except RuntimeError:
-        pass
+    client = RunpodClient(_fake_settings())
+    result = client.dispatch_video(prompt="a river at dawn", duration=8, job_id="our-job-42")
+
+    assert result == {"status": "dispatched", "runpod_job_id": "job-1"}
+    mock_get.assert_not_called()
 
 
-@patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
-def test_dispatch_video_raises_on_poll_timeout(mock_post, mock_get):
-    mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
-    mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "IN_PROGRESS"})
-
-    client = RunpodClient(_fake_settings(), poll_interval=0, max_poll_attempts=3)
-    try:
-        client.dispatch_video(prompt="x", duration=5)
-        assert False, "expected TimeoutError"
-    except TimeoutError:
-        pass
-    assert mock_get.call_count == 3
-
-
-@patch("app.runpod_client.httpx.get")
-@patch("app.runpod_client.httpx.post")
-def test_dispatch_image_submits_and_polls(mock_post, mock_get):
+def test_dispatch_image_submits_and_returns_dispatched(mock_post):
     mock_post.return_value = _mock_response(200, {"id": "job-2", "status": "IN_QUEUE"})
-    mock_get.return_value = _mock_response(200, {"id": "job-2", "status": "COMPLETED", "output": {"key": "images/x.png"}})
 
-    client = RunpodClient(_fake_settings(), poll_interval=0)
-    result = client.dispatch_image(prompt="a red fox")
+    client = RunpodClient(_fake_settings())
+    result = client.dispatch_image(prompt="a red fox", job_id="our-job-99")
 
-    assert result == {"output": {"key": "images/x.png"}}
+    assert result == {"status": "dispatched", "runpod_job_id": "job-2"}
     post_args, post_kwargs = mock_post.call_args
     assert post_args[0] == "https://api.runpod.ai/v2/img/run"
     assert post_kwargs["json"]["input"] == {"prompt": "a red fox"}
-    get_args, get_kwargs = mock_get.call_args
-    assert get_args[0] == "https://api.runpod.ai/v2/img/status/job-2"
+    assert post_kwargs["json"]["webhook"] == "https://api.example.com/webhooks/runpod/s3cr3t/our-job-99"
 
 
 @patch("app.runpod_client.httpx.post")
@@ -128,40 +99,19 @@ def test_dispatch_video_raises_on_non_200_submit(mock_post):
     mock_post.return_value = _mock_response(500, "upstream error")
     client = RunpodClient(_fake_settings())
     try:
-        client.dispatch_video(prompt="x", duration=5)
+        client.dispatch_video(prompt="x", duration=5, job_id="j")
         assert False, "expected RuntimeError"
     except RuntimeError:
         pass
 
 
-@patch("app.runpod_client.httpx.get")
 @patch("app.runpod_client.httpx.post")
-def test_dispatch_video_passes_through_handler_error_on_completed_status(mock_post, mock_get):
-    # RunPod status can be COMPLETED even when the handler itself rejected
-    # the prompt (moderation/validation) rather than crashing — the handler's
-    # own {"error": ...} return must survive un-wrapped so queue.py's
-    # _extract_output sees the "error" key and raises a clean message
-    # instead of a KeyError on a missing "bytes_b64".
+def test_dispatch_video_calls_on_submitted_with_job_id_before_returning(mock_post):
     mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
-    mock_get.return_value = _mock_response(
-        200, {"id": "job-1", "status": "COMPLETED", "output": {"error": "prompt rejected by moderation"}}
-    )
-
-    client = RunpodClient(_fake_settings(), poll_interval=0)
-    result = client.dispatch_video(prompt="x", duration=5)
-
-    assert result == {"error": "prompt rejected by moderation"}
-
-
-@patch("app.runpod_client.httpx.get")
-@patch("app.runpod_client.httpx.post")
-def test_dispatch_video_calls_on_submitted_with_job_id_before_polling(mock_post, mock_get):
-    mock_post.return_value = _mock_response(200, {"id": "job-1", "status": "IN_QUEUE"})
-    mock_get.return_value = _mock_response(200, {"id": "job-1", "status": "COMPLETED", "output": {"key": "clips/x.mp4"}})
     seen = []
 
-    client = RunpodClient(_fake_settings(), poll_interval=0)
-    client.dispatch_video(prompt="x", duration=5, on_submitted=seen.append)
+    client = RunpodClient(_fake_settings())
+    client.dispatch_video(prompt="x", duration=5, job_id="j", on_submitted=seen.append)
 
     assert seen == ["job-1"]
 
@@ -172,7 +122,7 @@ def test_dispatch_video_does_not_call_on_submitted_when_submit_fails(mock_post):
     seen = []
     client = RunpodClient(_fake_settings())
     try:
-        client.dispatch_video(prompt="x", duration=5, on_submitted=seen.append)
+        client.dispatch_video(prompt="x", duration=5, job_id="j", on_submitted=seen.append)
     except RuntimeError:
         pass
     assert seen == []

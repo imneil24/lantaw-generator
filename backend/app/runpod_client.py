@@ -7,37 +7,41 @@ import httpx
 class RunpodClient:
     # 240 attempts * 5s = 20 minutes: real LTX-2.5 video generation (text
     # encode, transformer denoise, spatial upscale, VAE decode) has been
-    # observed taking 8-13 minutes end to end, so the previous 10-minute
-    # ceiling raced RunPod's own executionTimeout and lost, aborting jobs
-    # that were still running fine on RunPod's side.
+    # observed taking 8-13 minutes end to end. Dispatch itself no longer
+    # polls against this ceiling (see dispatch_video/dispatch_image) — it
+    # now bounds policy.executionTimeout and the reconciliation sweep's/
+    # resume_orphaned_jobs's short capped polls instead.
     def __init__(self, settings, poll_interval: float = 5, max_poll_attempts: int = 240):
         self._video_key = settings.runpod_video_key
         self._image_key = settings.runpod_image_key
         self._video_endpoint = settings.runpod_video_endpoint
         self._image_endpoint = settings.runpod_image_endpoint
+        self._public_base_url = settings.public_base_url
+        self._webhook_secret = settings.runpod_webhook_secret
         self._poll_interval = poll_interval
         self._max_poll_attempts = max_poll_attempts
 
-    def dispatch_video(self, prompt: str, duration: float, on_submitted: Callable[[str], None] | None = None) -> dict:
+    def dispatch_video(self, prompt: str, duration: float, job_id: str,
+                        on_submitted: Callable[[str], None] | None = None) -> dict:
         return self._dispatch(
-            self._video_endpoint, self._video_key, {"prompt": prompt, "duration": duration}, on_submitted,
+            self._video_endpoint, self._video_key, {"prompt": prompt, "duration": duration}, job_id, on_submitted,
         )
 
-    def dispatch_image(self, prompt: str, on_submitted: Callable[[str], None] | None = None) -> dict:
-        return self._dispatch(self._image_endpoint, self._image_key, {"prompt": prompt}, on_submitted)
+    def dispatch_image(self, prompt: str, job_id: str,
+                        on_submitted: Callable[[str], None] | None = None) -> dict:
+        return self._dispatch(self._image_endpoint, self._image_key, {"prompt": prompt}, job_id, on_submitted)
 
     def poll_video(self, job_id: str, max_attempts: int | None = None) -> dict:
-        """Resumes polling an already-submitted video job by its RunPod job_id.
+        """Polls an already-submitted video job by its RunPod job_id.
 
-        For a job whose runpod_job_id was persisted (see queue.py's
-        on_submitted callback) but whose worker process died before the
-        original dispatch_video's poll loop returned — resuming here polls
-        the same RunPod job instead of submitting a duplicate one.
+        Used by the webhook-delivery-fallback reconciliation sweep
+        (ops/reconcile_stuck_jobs.py) and resume_orphaned_jobs — both need
+        to check RunPod's status directly for a job whose webhook callback
+        either hasn't arrived yet or was never delivered.
 
-        max_attempts overrides the instance's default poll ceiling — used by
-        queue.resume_orphaned_jobs to cap how long the startup sweep spends
-        on any one still-running orphan instead of blocking rq worker
-        startup for up to 20 minutes per job.
+        max_attempts overrides the instance's default poll ceiling so
+        these bounded safety-net sweeps don't block for the full ~20
+        minute worst case on any single job.
         """
         base = self._video_endpoint.rsplit("/", 1)[0]
         return self._poll(base, self._video_key, job_id, max_attempts)
@@ -47,9 +51,10 @@ class RunpodClient:
         return self._poll(base, self._image_key, job_id, max_attempts)
 
     def _dispatch(self, runsync_endpoint: str, api_key: str, input_payload: dict,
-                   on_submitted: Callable[[str], None] | None) -> dict:
+                   job_id: str, on_submitted: Callable[[str], None] | None) -> dict:
         base = runsync_endpoint.rsplit("/", 1)[0]
         headers = {"Authorization": f"Bearer {api_key}"}
+        webhook_url = f"{self._public_base_url}/webhooks/runpod/{self._webhook_secret}/{job_id}"
 
         # RunPod applies its own (undocumented, often shorter than expected)
         # default executionTimeout when a request doesn't specify one —
@@ -57,18 +62,24 @@ class RunpodClient:
         # /job-done callback even though the handler was still actively
         # generating, then reporting the failure as "executionTimeout
         # exceeded". Setting policy.executionTimeout (milliseconds)
-        # explicitly, matching our own poll ceiling, overrides that default
-        # for this job so RunPod's own timeout can't fire before ours does.
+        # explicitly overrides that default for this job. This is no
+        # longer tied to our own poll loop (dispatch no longer polls) — it
+        # remains sized off poll_interval/max_poll_attempts as a
+        # known-good worst-case job duration ceiling.
         execution_timeout_ms = self._poll_interval * self._max_poll_attempts * 1000
-        body = {"input": input_payload, "policy": {"executionTimeout": execution_timeout_ms}}
+        body = {
+            "input": input_payload,
+            "webhook": webhook_url,
+            "policy": {"executionTimeout": execution_timeout_ms},
+        }
         response = httpx.post(f"{base}/run", json=body, headers=headers, timeout=30)
         if response.status_code != 200:
             raise RuntimeError(f"RunPod job submission failed: status={response.status_code}")
-        job_id = response.json()["id"]
+        runpod_job_id = response.json()["id"]
         if on_submitted is not None:
-            on_submitted(job_id)
+            on_submitted(runpod_job_id)
 
-        return self._poll(base, api_key, job_id)
+        return {"status": "dispatched", "runpod_job_id": runpod_job_id}
 
     def _poll(self, base: str, api_key: str, job_id: str, max_attempts: int | None = None) -> dict:
         attempts = self._max_poll_attempts if max_attempts is None else max_attempts
