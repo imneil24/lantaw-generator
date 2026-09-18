@@ -32,6 +32,22 @@ def test_settings_loads_public_base_url_and_runpod_webhook_secret(monkeypatch, t
     assert settings.runpod_webhook_secret in settings.all_secrets()
 
 
+def test_webhook_route_via_create_app_does_not_require_auth_header(monkeypatch, tmp_path):
+    # Regression guard: app-level auth_dependency must not apply to the
+    # mounted webhook sub-app (see main.py's comment on the mount).
+    _set_env(monkeypatch, tmp_path)
+    from app.config import get_settings
+    get_settings.cache_clear()
+    from app.main import create_app
+    app = create_app()
+    client = TestClient(app)
+    # No Authorization header at all — a request that would 401 on any
+    # normal route (e.g. GET /jobs/{id}) must not 401 here.
+    response = client.post("/webhooks/runpod/wrong-secret/00000000-0000-0000-0000-000000000000",
+                            json={"id": "x", "status": "COMPLETED", "output": {}})
+    assert response.status_code == 404  # 404 (wrong secret), not 401 (auth)
+
+
 def test_unauthenticated_request_rejected(monkeypatch, tmp_path):
     _set_env(monkeypatch, tmp_path)
     from app.config import get_settings

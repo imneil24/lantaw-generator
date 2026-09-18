@@ -14,6 +14,7 @@ from app.r2 import R2Client
 from app.middleware.auth import make_auth_dependency
 from app.middleware.rate_limit import SlidingWindowLimiter, make_rate_limit_dependency
 from app.routes import generate_image, generate_video, jobs
+from app import webhooks
 from app.queue import process_clip_job, process_image_job, MAX_RETRIES
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,23 @@ def create_app() -> FastAPI:
 
     app.dependency_overrides[jobs.get_db_session] = db_session_override
     app.dependency_overrides[jobs.get_r2_client] = r2_override
+
+    # Mounted as a separate FastAPI sub-application, not include_router'd
+    # onto `app` — dependencies passed to FastAPI(...)'s constructor apply
+    # to every route on that instance app-wide, including routers added
+    # later via include_router, with no per-router opt-out (see
+    # test_route_added_without_explicit_dependencies_still_requires_auth in
+    # test_main.py, which asserts exactly this). RunPod's webhook callback
+    # carries no bearer key matching backend_api_key_hash, so this router
+    # must live on an instance that never had auth_dependency/
+    # rate_limit_dependency applied to it at all — a mount is the only way
+    # to achieve that. It is gated solely by the path secret (webhooks.py).
+    webhook_app = FastAPI()
+    webhook_app.include_router(webhooks.router)
+    webhook_app.dependency_overrides[webhooks.get_db_session] = db_session_override
+    webhook_app.dependency_overrides[webhooks.get_r2_client] = r2_override
+    webhook_app.dependency_overrides[webhooks.get_webhook_secret] = lambda: settings.runpod_webhook_secret
+    app.mount("/webhooks", webhook_app)
 
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):

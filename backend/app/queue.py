@@ -182,39 +182,56 @@ def _finish_image_job(session, r2_client, job: Job, result: dict) -> None:
     session.commit()
 
 
+def _finish_webhook_result(session, r2_client, job: Job, status: str, payload: dict) -> None:
+    """Finishes a job from a RunPod webhook callback or reconciliation poll.
+
+    status is RunPod's top-level job status ("COMPLETED"/"FAILED"), payload
+    is the full RunPod response body. Mirrors the by-type dispatch
+    resume_orphaned_jobs already does inline, factored out so webhooks.py
+    and ops/reconcile_stuck_jobs.py share one implementation instead of a
+    third copy of this branching.
+    """
+    if status == "FAILED":
+        _mark_job_failed_non_raising(session, job, RuntimeError(f"RunPod job failed: {payload.get('error', payload)}"))
+        return
+
+    result = {"output": payload.get("output")}
+    try:
+        if job.type == "clip":
+            _finish_clip_job(session, r2_client, job, result)
+        else:
+            _finish_image_job(session, r2_client, job, result)
+    except Exception as exc:
+        session.rollback()
+        _mark_job_failed_non_raising(session, job, exc)
+
+
 def process_clip_job(job_id: str) -> None:
-    session, runpod_client, r2_client = _build_dependencies()
+    session, runpod_client, _ = _build_dependencies()
     try:
         try:
             job = session.query(Job).filter_by(id=job_id).one()
         except NoResultFound:
             return
 
-        if job.status == "complete":
-            return  # redelivered/duplicate job; already processed
-
-        try:
-            if job.runpod_job_id is not None:
-                # A prior attempt already submitted this to RunPod (its
-                # runpod_job_id was persisted) but never got the result back
-                # — e.g. this same worker process's resume_orphaned_jobs
-                # sweep is racing an RQ redelivery of this job_id. Poll the
-                # existing RunPod job instead of dispatching a second,
-                # duplicate one for the same prompt.
-                result = runpod_client.poll_video(job.runpod_job_id)
-            else:
-                def _persist_runpod_job_id(runpod_job_id: str) -> None:
-                    job.runpod_job_id = runpod_job_id
-                    session.commit()
-
-                result = runpod_client.dispatch_video(
-                    prompt=job.prompt, duration=job.duration, on_submitted=_persist_runpod_job_id,
-                )
-        except Exception as exc:
-            _handle_failure(session, job, exc)
+        if job.status in ("complete", "dispatched"):
+            # "complete": redelivered/duplicate job, already finished.
+            # "dispatched": already sent to RunPod by a prior attempt — the
+            # webhook (or ops/reconcile_stuck_jobs.py's sweep) owns
+            # finishing it now, not a redelivered process_clip_job call.
             return
 
-        _finish_clip_job(session, r2_client, job, result)
+        try:
+            def _persist_dispatched(runpod_job_id: str) -> None:
+                job.runpod_job_id = runpod_job_id
+                job.status = "dispatched"
+                session.commit()
+
+            runpod_client.dispatch_video(
+                prompt=job.prompt, duration=job.duration, job_id=job.id, on_submitted=_persist_dispatched,
+            )
+        except Exception as exc:
+            _handle_failure(session, job, exc)
     finally:
         session.close()
 
@@ -274,29 +291,23 @@ def resume_orphaned_jobs() -> None:
 
 
 def process_image_job(job_id: str) -> None:
-    session, runpod_client, r2_client = _build_dependencies()
+    session, runpod_client, _ = _build_dependencies()
     try:
         try:
             job = session.query(Job).filter_by(id=job_id).one()
         except NoResultFound:
             return
 
-        if job.status == "complete":
-            return  # redelivered/duplicate job; already processed
+        if job.status in ("complete", "dispatched"):
+            return
 
         try:
-            if job.runpod_job_id is not None:
-                # See the matching guard in process_clip_job: a prior
-                # attempt already submitted this to RunPod — poll it instead
-                # of dispatching a second, duplicate image job.
-                result = runpod_client.poll_image(job.runpod_job_id)
-            else:
-                def _persist_runpod_job_id(runpod_job_id: str) -> None:
-                    job.runpod_job_id = runpod_job_id
-                    session.commit()
+            def _persist_dispatched(runpod_job_id: str) -> None:
+                job.runpod_job_id = runpod_job_id
+                job.status = "dispatched"
+                session.commit()
 
-                result = runpod_client.dispatch_image(prompt=job.prompt, on_submitted=_persist_runpod_job_id)
-            _finish_image_job(session, r2_client, job, result)
+            runpod_client.dispatch_image(prompt=job.prompt, job_id=job.id, on_submitted=_persist_dispatched)
         except Exception as exc:
             _handle_failure(session, job, exc)
     finally:

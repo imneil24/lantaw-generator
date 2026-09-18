@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Job, VideoProject, ProjectClip
-from app.queue import process_clip_job, process_image_job, resume_orphaned_jobs, _extract_output
+from app.queue import process_clip_job, process_image_job, resume_orphaned_jobs, _extract_output, _finish_webhook_result
 
 
 def test_extract_output_raises_on_completed_job_with_empty_output():
@@ -26,39 +26,16 @@ def _make_session():
     return Session()
 
 
-def test_process_clip_job_marks_complete_on_success():
+def test_process_clip_job_dispatches_and_returns_without_finishing():
     session = _make_session()
     job_id = str(uuid.uuid4())
     session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
     session.commit()
 
-    runpod_client = MagicMock()
-    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/x.mp4"}}
-    r2_client = MagicMock()
-
-    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
-        process_clip_job(job_id)
-
-    updated = session.query(Job).filter_by(id=job_id).one()
-    assert updated.status == "complete"
-    assert updated.result_key == "clips/x.mp4"
-    # worker-video/handler.py uploads the clip to R2 itself and returns only
-    # the key — a full HD video base64-encoded into the job result is too
-    # large for RunPod's own /job-done callback (rejected with a 400), so
-    # the backend must not expect or re-upload raw bytes for video jobs.
-    r2_client.upload.assert_not_called()
-
-
-def test_process_clip_job_persists_runpod_job_id_as_soon_as_submitted():
-    session = _make_session()
-    job_id = str(uuid.uuid4())
-    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
-    session.commit()
-
-    def fake_dispatch_video(prompt, duration, on_submitted=None):
+    def fake_dispatch_video(prompt, duration, job_id, on_submitted=None):
         if on_submitted is not None:
             on_submitted("runpod-job-abc")
-        return {"output": {"key": "clips/x.mp4"}}
+        return {"status": "dispatched", "runpod_job_id": "runpod-job-abc"}
 
     runpod_client = MagicMock()
     runpod_client.dispatch_video.side_effect = fake_dispatch_video
@@ -68,7 +45,33 @@ def test_process_clip_job_persists_runpod_job_id_as_soon_as_submitted():
         process_clip_job(job_id)
 
     updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "dispatched"
     assert updated.runpod_job_id == "runpod-job-abc"
+    assert updated.result_key is None  # not finished — webhook finishes it
+    r2_client.upload.assert_not_called()
+
+
+def test_process_image_job_dispatches_and_returns_without_finishing():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="pending", retry_count=0))
+    session.commit()
+
+    def fake_dispatch_image(prompt, job_id, on_submitted=None):
+        if on_submitted is not None:
+            on_submitted("runpod-job-img-1")
+        return {"status": "dispatched", "runpod_job_id": "runpod-job-img-1"}
+
+    runpod_client = MagicMock()
+    runpod_client.dispatch_image.side_effect = fake_dispatch_image
+    r2_client = MagicMock()
+
+    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
+        process_image_job(job_id)
+
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "dispatched"
+    assert updated.runpod_job_id == "runpod-job-img-1"
 
 
 def test_process_clip_job_marks_failed_and_reraises_when_rq_has_no_retries_left():
@@ -121,6 +124,55 @@ def test_process_clip_job_reraises_and_increments_retry_count_when_rq_has_retrie
     assert updated.status == "pending"
 
 
+def test_finish_webhook_result_completes_clip_job():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="dispatched",
+                     retry_count=0, runpod_job_id="rp-1"))
+    session.commit()
+    job = session.query(Job).filter_by(id=job_id).one()
+    r2_client = MagicMock()
+
+    _finish_webhook_result(session, r2_client, job, "COMPLETED", {"id": "rp-1", "output": {"key": "clips/x.mp4"}})
+
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "complete"
+    assert updated.result_key == "clips/x.mp4"
+
+
+def test_finish_webhook_result_completes_image_job():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="dispatched",
+                     retry_count=0, runpod_job_id="rp-2"))
+    session.commit()
+    job = session.query(Job).filter_by(id=job_id).one()
+    r2_client = MagicMock()
+    r2_client.upload.return_value = "images/x.png"
+
+    _finish_webhook_result(session, r2_client, job, "COMPLETED",
+                            {"id": "rp-2", "output": {"key": "images/x.png", "bytes_b64": "AA=="}})
+
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "complete"
+
+
+def test_finish_webhook_result_marks_failed_on_failed_status():
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="dispatched",
+                     retry_count=0, runpod_job_id="rp-3"))
+    session.commit()
+    job = session.query(Job).filter_by(id=job_id).one()
+    r2_client = MagicMock()
+
+    _finish_webhook_result(session, r2_client, job, "FAILED", {"id": "rp-3", "error": "OOM"})
+
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "failed"
+    assert updated.retry_count == 1
+
+
 def test_mark_job_failed_non_raising_does_not_reraise():
     from app.queue import _mark_job_failed_non_raising
     session = _make_session()
@@ -161,7 +213,7 @@ def test_process_clip_job_missing_row_returns_without_raising():
         process_clip_job(str(uuid.uuid4()))  # does not raise NoResultFound
 
 
-def test_process_clip_job_triggers_stitch_when_last_clip_in_project_completes(tmp_path, monkeypatch):
+def test_finishing_last_clip_in_project_triggers_stitch(tmp_path, monkeypatch):
     monkeypatch.setattr("app.tts.NullTTSProvider.generate", lambda self, text, target_duration: str(tmp_path / "silence.wav"))
     session = _make_session()
 
@@ -172,22 +224,22 @@ def test_process_clip_job_triggers_stitch_when_last_clip_in_project_completes(tm
     job2_id = str(uuid.uuid4())
     session.add(Job(id=job1_id, type="clip", prompt="p", duration=10.0, status="complete",
                      retry_count=0, result_key="clips/a.mp4"))
-    session.add(Job(id=job2_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
+    session.add(Job(id=job2_id, type="clip", prompt="p", duration=10.0, status="dispatched",
+                     retry_count=0, runpod_job_id="rp-2"))
     session.add(ProjectClip(project_id=project_id, sequence_index=0, job_id=job1_id))
     session.add(ProjectClip(project_id=project_id, sequence_index=1, job_id=job2_id))
     session.commit()
 
-    runpod_client = MagicMock()
-    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/b.mp4"}}
     r2_client = MagicMock()
     r2_client.download.return_value = b"fake-clip-bytes"
 
     def fake_stitch(clip_paths, audio_path, output_path):
         open(output_path, "wb").write(b"final-video-bytes")
 
-    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)), \
-         patch("app.queue.stitch_project", side_effect=fake_stitch) as mock_stitch:
-        process_clip_job(job2_id)
+    from app.queue import _finish_clip_job
+    job2 = session.query(Job).filter_by(id=job2_id).one()
+    with patch("app.queue.stitch_project", side_effect=fake_stitch) as mock_stitch:
+        _finish_clip_job(session, r2_client, job2, {"output": {"key": "clips/b.mp4"}})
 
     mock_stitch.assert_called_once()
     project = session.query(VideoProject).filter_by(id=project_id).one()
@@ -196,33 +248,6 @@ def test_process_clip_job_triggers_stitch_when_last_clip_in_project_completes(tm
     # worker-video/handler.py uploads each clip to R2 itself; the backend
     # only uploads the stitched final video.
     assert r2_client.upload.call_count == 1
-
-
-def test_process_clip_job_does_not_stitch_when_sibling_clips_still_pending():
-    session = _make_session()
-
-    project_id = str(uuid.uuid4())
-    session.add(VideoProject(id=project_id, target_duration=20.0, clip_count=2, status="pending"))
-
-    job1_id = str(uuid.uuid4())
-    job2_id = str(uuid.uuid4())
-    session.add(Job(id=job1_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
-    session.add(Job(id=job2_id, type="clip", prompt="p", duration=10.0, status="pending", retry_count=0))
-    session.add(ProjectClip(project_id=project_id, sequence_index=0, job_id=job1_id))
-    session.add(ProjectClip(project_id=project_id, sequence_index=1, job_id=job2_id))
-    session.commit()
-
-    runpod_client = MagicMock()
-    runpod_client.dispatch_video.return_value = {"output": {"key": "clips/a.mp4"}}
-    r2_client = MagicMock()
-
-    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)), \
-         patch("app.queue.stitch_project") as mock_stitch:
-        process_clip_job(job1_id)
-
-    mock_stitch.assert_not_called()
-    project = session.query(VideoProject).filter_by(id=project_id).one()
-    assert project.status == "pending"
 
 
 def test_process_clip_job_skips_dispatch_when_already_complete():
@@ -332,48 +357,45 @@ def test_maybe_stitch_project_failure_does_not_affect_clip_job_status():
     assert project.status == "pending"  # stitch never completed, but nothing corrupted
 
 
-def test_process_clip_job_polls_instead_of_redispatching_when_runpod_job_id_already_set():
-    # If job.runpod_job_id is already set (a prior attempt submitted it, or
-    # resume_orphaned_jobs raced this same call), process_clip_job must not
-    # submit a second, duplicate RunPod job for the same prompt.
+def test_process_clip_job_noop_when_already_dispatched():
+    # Redelivered RQ job for one already sent to RunPod — the webhook (or
+    # reconciliation sweep) owns finishing it now, not a redelivered
+    # process_clip_job call.
     session = _make_session()
     job_id = str(uuid.uuid4())
-    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="pending",
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="dispatched",
                      retry_count=0, runpod_job_id="runpod-job-existing"))
     session.commit()
 
     runpod_client = MagicMock()
-    runpod_client.poll_video.return_value = {"output": {"key": "clips/x.mp4"}}
     r2_client = MagicMock()
 
     with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
         process_clip_job(job_id)
 
-    runpod_client.poll_video.assert_called_once_with("runpod-job-existing")
     runpod_client.dispatch_video.assert_not_called()
+    runpod_client.poll_video.assert_not_called()
     updated = session.query(Job).filter_by(id=job_id).one()
-    assert updated.status == "complete"
-    assert updated.result_key == "clips/x.mp4"
+    assert updated.status == "dispatched"  # untouched
 
 
-def test_process_image_job_polls_instead_of_redispatching_when_runpod_job_id_already_set():
+def test_process_image_job_noop_when_already_dispatched():
     session = _make_session()
     job_id = str(uuid.uuid4())
-    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="pending",
+    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="dispatched",
                      retry_count=0, runpod_job_id="runpod-job-existing-img"))
     session.commit()
 
     runpod_client = MagicMock()
-    runpod_client.poll_image.return_value = {"output": {"key": "images/x.png", "bytes_b64": "AA=="}}
     r2_client = MagicMock()
 
     with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
         process_image_job(job_id)
 
-    runpod_client.poll_image.assert_called_once_with("runpod-job-existing-img")
     runpod_client.dispatch_image.assert_not_called()
+    runpod_client.poll_image.assert_not_called()
     updated = session.query(Job).filter_by(id=job_id).one()
-    assert updated.status == "complete"
+    assert updated.status == "dispatched"
 
 
 def test_resume_orphaned_jobs_leaves_still_running_job_pending_on_timeout():
@@ -492,20 +514,3 @@ def test_resume_orphaned_jobs_marks_failed_without_aborting_the_rest_of_the_swee
     assert healthy_job.result_key == "clips/ok.mp4"
 
 
-def test_process_image_job_marks_complete_on_success():
-    session = _make_session()
-    job_id = str(uuid.uuid4())
-    session.add(Job(id=job_id, type="image", prompt="p", duration=None, status="pending", retry_count=0))
-    session.commit()
-
-    runpod_client = MagicMock()
-    runpod_client.dispatch_image.return_value = {"output": {"key": "images/x.png", "bytes_b64": "AA=="}}
-    r2_client = MagicMock()
-    r2_client.upload.return_value = "images/x.png"
-
-    with patch("app.queue._build_dependencies", return_value=(session, runpod_client, r2_client)):
-        process_image_job(job_id)
-
-    updated = session.query(Job).filter_by(id=job_id).one()
-    assert updated.status == "complete"
-    assert updated.result_key == "images/x.png"
