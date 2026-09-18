@@ -65,11 +65,13 @@ def create_app() -> FastAPI:
             # process_image_job rebuild their own DB session and API clients
             # from env-derived Settings rather than receiving live,
             # unpicklable connections as arguments.
-            # RQ's default job_timeout (180s) is shorter than RunpodClient's
-            # own poll budget (up to 240 * 5s = 1200s for video), so RQ would
-            # kill the job mid-poll and count it as a crashed worker rather
-            # than letting RunpodClient's own TimeoutError surface cleanly.
-            job_queue.enqueue(target, job_id, retry=Retry(max=MAX_RETRIES), job_timeout=1500)
+            # process_clip_job/process_image_job now dispatch-and-return
+            # (a single RunPod /run POST + DB commit) rather than blocking
+            # for the full generation duration — see webhooks.py for how
+            # completion is now driven by RunPod's callback instead of an
+            # in-job poll loop. 120s is generous headroom over the
+            # dispatch call's own 30s httpx timeout.
+            job_queue.enqueue(target, job_id, retry=Retry(max=MAX_RETRIES), job_timeout=120)
         return enqueue
 
     app.include_router(generate_image.router)
