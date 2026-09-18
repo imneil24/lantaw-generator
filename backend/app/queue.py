@@ -71,6 +71,22 @@ def _handle_failure(session, job: Job, exc: Exception) -> None:
     raise exc
 
 
+def _mark_job_failed_non_raising(session, job: Job, exc: Exception) -> None:
+    """Marks a job failed without re-raising, for callers with no RQ retry mechanism.
+
+    _handle_failure always re-raises because it runs inside an RQ job and
+    RQ's own Retry(max=...) needs the exception to decide whether to
+    re-enqueue. This variant is for callers that are NOT inside an RQ job —
+    the webhook handler and the periodic/startup reconciliation sweeps —
+    where there is no RQ retry to hand the exception to, and swallowing it
+    here lets the caller continue processing other jobs/requests.
+    """
+    logger.exception("job_id=%s failed: %s", job.id, exc)
+    job.retry_count += 1
+    job.status = "failed"
+    session.commit()
+
+
 def _maybe_stitch_project(session, r2_client, job: Job) -> None:
     """After a clip job completes, stitch its project once every sibling clip is done.
 
@@ -247,18 +263,12 @@ def resume_orphaned_jobs() -> None:
                 # pending for a later sweep or RQ redelivery to pick up.
                 logger.info("orphaned job_id=%s still running on RunPod, will retry later", job.id)
                 session.rollback()
-            except Exception:
+            except Exception as exc:
                 # Not running inside an RQ job (this is a one-shot startup
                 # sweep), so there's no RQ retry mechanism to hand the
-                # exception to — mark it failed directly and move on to the
-                # next orphan rather than reusing _handle_failure, which
-                # always re-raises for RQ's benefit and would abort the
-                # whole sweep after the first failure.
-                logger.exception("failed to resume orphaned job_id=%s", job.id)
+                # exception to.
                 session.rollback()
-                job.retry_count += 1
-                job.status = "failed"
-                session.commit()
+                _mark_job_failed_non_raising(session, job, exc)
     finally:
         session.close()
 

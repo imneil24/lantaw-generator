@@ -121,6 +121,21 @@ def test_process_clip_job_reraises_and_increments_retry_count_when_rq_has_retrie
     assert updated.status == "pending"
 
 
+def test_mark_job_failed_non_raising_does_not_reraise():
+    from app.queue import _mark_job_failed_non_raising
+    session = _make_session()
+    job_id = str(uuid.uuid4())
+    session.add(Job(id=job_id, type="clip", prompt="p", duration=10.0, status="dispatched", retry_count=1))
+    session.commit()
+    job = session.query(Job).filter_by(id=job_id).one()
+
+    _mark_job_failed_non_raising(session, job, RuntimeError("boom"))  # must not raise
+
+    updated = session.query(Job).filter_by(id=job_id).one()
+    assert updated.status == "failed"
+    assert updated.retry_count == 2
+
+
 def test_is_final_attempt_true_outside_rq_worker_context():
     from app.queue import _is_final_attempt
     with patch("app.queue.get_current_job", return_value=None):
