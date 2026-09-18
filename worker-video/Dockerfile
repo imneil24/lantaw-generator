@@ -1,10 +1,14 @@
 FROM nvidia/cuda:13.2.1-cudnn-runtime-ubuntu22.04
 
-# gcc + python3.11-dev are required at runtime, not just build time: triton
+# gcc + python3.10-dev are required at runtime, not just build time: triton
 # (pulled in by natten's dependency chain) JIT-compiles CUDA kernels on first
 # use, invoking a C compiler from inside the running container and linking
 # against Python.h — neither ships in the plain -runtime base image.
-RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-dev python3-pip git curl ca-certificates gcc && rm -rf /var/lib/apt/lists/*
+# python3.10-dev (not 3.11) matches the interpreter uv's venv actually uses:
+# Ubuntu 22.04's system python3 is 3.10, and `uv sync` inside the LTX-2 repo
+# picks that up, confirmed by the failing gcc command's own
+# -I/usr/include/python3.10 flag and cuda_utils.cpython-310 output name.
+RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3.10-dev python3-pip git curl ca-certificates gcc && rm -rf /var/lib/apt/lists/*
 
 # uv manages the LTX-2 workspace's own dependency resolution (torch 2.13/cu132,
 # natten's flat wheel index, the ltx-core/ltx-pipelines workspace members) —
