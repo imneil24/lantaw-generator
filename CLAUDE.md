@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Self-hosted LTX-2.3 video and FLUX.1-schnell image generation service on RunPod
+Self-hosted LTX-2.5 video and FLUX.1-schnell image generation service on RunPod
 Serverless. A FastAPI backend proxies auth/rate-limiting/moderation/queueing in
 front of two independent RunPod Serverless endpoints (video, image), stitches
 completed clips into long-form video, and uploads results to Cloudflare R2.
@@ -19,7 +19,7 @@ Four independently-versioned Python components, each with its own venv,
 file or package:
 
 - `backend/` — FastAPI proxy (auth, rate limit, moderation, job queue, DB, stitching)
-- `worker-video/` — RunPod handler for LTX-2.3, deployed as its own container
+- `worker-video/` — RunPod handler for LTX-2.5, deployed as its own container
 - `worker-image/` — RunPod handler for FLUX.1-schnell, deployed as its own container
 - `ops/` — standalone cron scripts (cost alert, RunPod scale-drift guard, revenue tracker)
 
@@ -91,18 +91,28 @@ never sourced from the request.
 
 **Two RunPod workers, one shared shape but independent deploy lifecycles.**
 `worker-video/handler.py` and `worker-image/handler.py` both: load their
-model once into a module-global on cold start, validate input strictly,
-raise `NotImplementedError` in `_generate_video`/`_generate_image` (the real
-inference call is not vendored here — wiring it needs the actual model
-weights and a GPU, which this repo's test suite cannot exercise). Each has
-its own `Dockerfile` and is meant to connect directly to RunPod for
-auto-build-on-push rather than share a base image.
+model once into a module-global on cold start (guarded by a lock against
+concurrent cold-start races on a warm RunPod worker), and validate input
+strictly. `worker-video/handler.py` loads LTX-2.5's 22B distilled transformer
+(bf16) plus a Gemma-3-12B text encoder, video/audio VAEs, and a spatial
+upsampler from `/runpod-volume/ltx-2.5` (weights are not baked into the
+image) via `ltx_pipelines.distilled.DistilledPipeline`, with
+`OffloadMode.CPU` — `OffloadMode.NONE` was confirmed to OOM on a 32GB card.
+Each worker has its own `Dockerfile` and is meant to connect directly to
+RunPod for auto-build-on-push rather than share a base image.
 
-**Video duration determines model variant, not caller choice.**
-`worker-video/handler.py`'s `select_model_variant` routes `duration <= 10` to
-`ltx-2-3-pro` (keeps retake/extend/reframe repair tools) and `10 < duration
-<= 20` to `ltx-2-3-fast` (drops those tools) — this routing is internal only;
-the caller never selects a variant directly.
+**GPU sizing for worker-video is tight even with CPU offload.** The 22B
+transformer + 12B text encoder alone are >60GB combined at bf16 before VAEs
+and activations; a 32GB card OOMs even with offload enabled per the comment
+in `_load_pipeline_impl`. Use an 80GB card (A100 80GB or H100 80GB) on the
+RunPod endpoint for this worker — this is not encoded in the repo (RunPod
+endpoint GPU type is configured outside this codebase) so verify current
+endpoint config separately.
+
+**Video length is bounded, not variant-routed.** `worker-video/handler.py`
+validates `duration` against `FAST_MAX_DURATION` (20s) and generates directly
+via the single `DistilledPipeline` — there is no per-duration model variant
+selection in the current handler.
 
 **Video generation fans out into many clip jobs.** `POST /generate-video`
 splits `target_duration` into `ceil(target_duration / 10)` separate 10-second
