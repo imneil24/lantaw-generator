@@ -26,20 +26,25 @@ class RunpodClient:
     def dispatch_image(self, prompt: str, on_submitted: Callable[[str], None] | None = None) -> dict:
         return self._dispatch(self._image_endpoint, self._image_key, {"prompt": prompt}, on_submitted)
 
-    def poll_video(self, job_id: str) -> dict:
+    def poll_video(self, job_id: str, max_attempts: int | None = None) -> dict:
         """Resumes polling an already-submitted video job by its RunPod job_id.
 
         For a job whose runpod_job_id was persisted (see queue.py's
         on_submitted callback) but whose worker process died before the
         original dispatch_video's poll loop returned — resuming here polls
         the same RunPod job instead of submitting a duplicate one.
+
+        max_attempts overrides the instance's default poll ceiling — used by
+        queue.resume_orphaned_jobs to cap how long the startup sweep spends
+        on any one still-running orphan instead of blocking rq worker
+        startup for up to 20 minutes per job.
         """
         base = self._video_endpoint.rsplit("/", 1)[0]
-        return self._poll(base, self._video_key, job_id)
+        return self._poll(base, self._video_key, job_id, max_attempts)
 
-    def poll_image(self, job_id: str) -> dict:
+    def poll_image(self, job_id: str, max_attempts: int | None = None) -> dict:
         base = self._image_endpoint.rsplit("/", 1)[0]
-        return self._poll(base, self._image_key, job_id)
+        return self._poll(base, self._image_key, job_id, max_attempts)
 
     def _dispatch(self, runsync_endpoint: str, api_key: str, input_payload: dict,
                    on_submitted: Callable[[str], None] | None) -> dict:
@@ -65,10 +70,11 @@ class RunpodClient:
 
         return self._poll(base, api_key, job_id)
 
-    def _poll(self, base: str, api_key: str, job_id: str) -> dict:
+    def _poll(self, base: str, api_key: str, job_id: str, max_attempts: int | None = None) -> dict:
+        attempts = self._max_poll_attempts if max_attempts is None else max_attempts
         headers = {"Authorization": f"Bearer {api_key}"}
         status_url = f"{base}/status/{job_id}"
-        for _ in range(self._max_poll_attempts):
+        for _ in range(attempts):
             status_response = httpx.get(status_url, headers=headers, timeout=30)
             if status_response.status_code != 200:
                 raise RuntimeError(f"RunPod status check failed: status={status_response.status_code}")
@@ -83,4 +89,4 @@ class RunpodClient:
                 raise RuntimeError(f"RunPod job failed: {payload.get('error', payload)}")
             time.sleep(self._poll_interval)
 
-        raise TimeoutError(f"RunPod job {job_id} did not complete within {self._max_poll_attempts} poll attempts")
+        raise TimeoutError(f"RunPod job {job_id} did not complete within {attempts} poll attempts")

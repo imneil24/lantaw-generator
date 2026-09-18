@@ -156,6 +156,16 @@ def _finish_clip_job(session, r2_client, job: Job, result: dict) -> None:
     _maybe_stitch_project(session, r2_client, job)
 
 
+def _finish_image_job(session, r2_client, job: Job, result: dict) -> None:
+    output = _extract_output(result)
+    raw_bytes = base64.b64decode(output["bytes_b64"])
+    key = output["key"]
+    r2_client.upload(key, raw_bytes, "image/png")
+    job.status = "complete"
+    job.result_key = key
+    session.commit()
+
+
 def process_clip_job(job_id: str) -> None:
     session, runpod_client, r2_client = _build_dependencies()
     try:
@@ -167,14 +177,23 @@ def process_clip_job(job_id: str) -> None:
         if job.status == "complete":
             return  # redelivered/duplicate job; already processed
 
-        def _persist_runpod_job_id(runpod_job_id: str) -> None:
-            job.runpod_job_id = runpod_job_id
-            session.commit()
-
         try:
-            result = runpod_client.dispatch_video(
-                prompt=job.prompt, duration=job.duration, on_submitted=_persist_runpod_job_id,
-            )
+            if job.runpod_job_id is not None:
+                # A prior attempt already submitted this to RunPod (its
+                # runpod_job_id was persisted) but never got the result back
+                # — e.g. this same worker process's resume_orphaned_jobs
+                # sweep is racing an RQ redelivery of this job_id. Poll the
+                # existing RunPod job instead of dispatching a second,
+                # duplicate one for the same prompt.
+                result = runpod_client.poll_video(job.runpod_job_id)
+            else:
+                def _persist_runpod_job_id(runpod_job_id: str) -> None:
+                    job.runpod_job_id = runpod_job_id
+                    session.commit()
+
+                result = runpod_client.dispatch_video(
+                    prompt=job.prompt, duration=job.duration, on_submitted=_persist_runpod_job_id,
+                )
         except Exception as exc:
             _handle_failure(session, job, exc)
             return
@@ -199,6 +218,17 @@ def resume_orphaned_jobs() -> None:
     startup (see worker_entrypoint.py) rather than from inside a normal job
     handler, since this is a sweep across all orphans, not a single job.
     """
+    # Each orphan gets a short, bounded check rather than the full ~20min
+    # poll ceiling — resume_orphaned_jobs runs before rq worker starts
+    # accepting jobs, so a container that crashed with several jobs in
+    # flight must not block startup for up to 20 minutes per orphan. A job
+    # that's still genuinely running on RunPod after this many attempts is
+    # left untouched (still "pending" with runpod_job_id set) — it'll be
+    # picked up either by this same sweep on the next restart, or by
+    # process_clip_job/process_image_job's own runpod_job_id guard the next
+    # time RQ redelivers it, both of which poll rather than re-dispatch.
+    RESUME_POLL_ATTEMPTS = 6  # ~30s at the default 5s poll_interval
+
     session, runpod_client, r2_client = _build_dependencies()
     try:
         orphans = session.query(Job).filter(
@@ -207,17 +237,16 @@ def resume_orphaned_jobs() -> None:
         for job in orphans:
             try:
                 if job.type == "clip":
-                    result = runpod_client.poll_video(job.runpod_job_id)
+                    result = runpod_client.poll_video(job.runpod_job_id, max_attempts=RESUME_POLL_ATTEMPTS)
                     _finish_clip_job(session, r2_client, job, result)
                 else:
-                    result = runpod_client.poll_image(job.runpod_job_id)
-                    output = _extract_output(result)
-                    raw_bytes = base64.b64decode(output["bytes_b64"])
-                    key = output["key"]
-                    r2_client.upload(key, raw_bytes, "image/png")
-                    job.status = "complete"
-                    job.result_key = key
-                    session.commit()
+                    result = runpod_client.poll_image(job.runpod_job_id, max_attempts=RESUME_POLL_ATTEMPTS)
+                    _finish_image_job(session, r2_client, job, result)
+            except TimeoutError:
+                # Still running on RunPod's side, not a failure — leave it
+                # pending for a later sweep or RQ redelivery to pick up.
+                logger.info("orphaned job_id=%s still running on RunPod, will retry later", job.id)
+                session.rollback()
             except Exception:
                 # Not running inside an RQ job (this is a one-shot startup
                 # sweep), so there's no RQ retry mechanism to hand the
@@ -245,19 +274,19 @@ def process_image_job(job_id: str) -> None:
         if job.status == "complete":
             return  # redelivered/duplicate job; already processed
 
-        def _persist_runpod_job_id(runpod_job_id: str) -> None:
-            job.runpod_job_id = runpod_job_id
-            session.commit()
-
         try:
-            result = runpod_client.dispatch_image(prompt=job.prompt, on_submitted=_persist_runpod_job_id)
-            output = _extract_output(result)
-            raw_bytes = base64.b64decode(output["bytes_b64"])
-            key = output["key"]
-            r2_client.upload(key, raw_bytes, "image/png")
-            job.status = "complete"
-            job.result_key = key
-            session.commit()
+            if job.runpod_job_id is not None:
+                # See the matching guard in process_clip_job: a prior
+                # attempt already submitted this to RunPod — poll it instead
+                # of dispatching a second, duplicate image job.
+                result = runpod_client.poll_image(job.runpod_job_id)
+            else:
+                def _persist_runpod_job_id(runpod_job_id: str) -> None:
+                    job.runpod_job_id = runpod_job_id
+                    session.commit()
+
+                result = runpod_client.dispatch_image(prompt=job.prompt, on_submitted=_persist_runpod_job_id)
+            _finish_image_job(session, r2_client, job, result)
         except Exception as exc:
             _handle_failure(session, job, exc)
     finally:
